@@ -1,2 +1,2 @@
 # VLPT
-Embodying LMs via VLM-style fusion with VPT-style pre-training
+Embodying LMs using VLM-style fusion and VPT-style pre-training
