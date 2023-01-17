@@ -122,6 +122,7 @@ class MinecraftPolicy(nn.Module):
 
     def __init__(
         self,
+        device,
         recurrence_type="transformer", 
         impala_width=8,
         impala_chans=(16, 32, 32),
@@ -152,6 +153,8 @@ class MinecraftPolicy(nn.Module):
         **unused_kwargs,
     ):
         super().__init__()
+        self.device = device
+
         assert recurrence_type == "transformer"
         self.recurrence_type = "transformer"
         active_reward_monitors = active_reward_monitors or {}
@@ -235,84 +238,110 @@ class MinecraftPolicy(nn.Module):
     # --------------       ---------------         -------------       -----------       KEY ARCHITECTURE DEFINITION
     
     def forward(self, ob_words, ob_frames, VPT_state_in, context):
-
+        batch_size = len(ob_words['token_ids'])
         #@ for both ms, ms should be a [num_frames] or [num_words] long array
         #@ change word_obs  to allow for batching @batch1
-
         first = context["first"]
         print("agent.policy.net.forward(): ob_words, ob_frames shapes:",  ob_words.shape, ob_frames['img'].shape )
-
+        # convert word token ids to embeddings. since LM(words) works from token_indices and we need to pass
+        # VPT representations as raw vectors, we need to use LM(words, from_embeddings=True),
+        # which requires us to pre-embed to token ids
+        input_embeddings = self.LM.model.decoder.embed_tokens(ob_words["input_ids"])
+        input_embeddings = self.LM.model.decoder.project_in(input_embeddings) # for more model expressiveness, edited modelling_opt.py so that we can input full LM embeddings (1024) rather then word representations (512), i.e. work just before positional embeddings are added, which are also 1024 big.
         
 
+        SILENCE_TOKEN_ID = 1437 # newline character=50118. single space=1437 luckily, in this tokenizer, stray spaces are classified as separate characters isntead of extensions of real word parts, so it is an intuitive 1:1 translation of extra spaces from human langauge to model. Hopefully it is therefore much easier to learn!
+        
+
+        # ------------------------------------------------------- START PASSING THOURGH VPT MODEL
+        # pass input frames through CNN section
         x = self.img_preprocess(ob_frames["img"])
         x = self.img_process(x)
 
-        # pass frame through VPT Agent transformer layer #1
+        # pass processed frames through VPT Agent transformer layer #1
         x, VPT1_state_out = self.recurrent_layer(x, first, [VPT_state_in[0]], start_block=0, end_block=1)
         
 
         # -------------------------------- INSERT LM
-
         x2_ = x.clone()
         #only call once per batch.
         
-        # for every frame, pass previous 128 frames through LM
-        LM_out = []*x2.shape[1]
-        word_out = []
-        for t in range(len(x2_.shape[1])):
-            
+        # for every frame, pass previous 128 frames and previous 2048 langauge tokens through LM
+        # output of LM is: 
+        
+        LM_raw_out = []*x2.shape[1]
+        LM_head_out= []*x2.shape[1]
+        # get words from frame t backwards
+        word_padding_mask_tensor = th.zeros([batch_size, 2048]).to(device)
 
-            # get past frames from t up to 128 before
-            frame_ms = ob_frames['ms'][t]
+        for t in range(len(x2.shape[1])):
 
-            # get words from frame t backwards
-            token_ids_in_context = ob_words['token_ids'][th.where(ob_words['ms']<=frame_ms)]
-            # crop at 2048 words
-            token_ids_in_context = token_ids_in_context[max(-2048, -len(token_ids_in_context)):]
-            #@ make sure to add word padding so sentences with different lengths work
-            token_ids_padding = 
+            # crop input words according to ms
+            # and add word padding
+            word_padding_mask_tensor.fill(0)
+            Xattn_mask = th.ones([batch_size*16, l.shape[1], x.shape[1]], dtype=th.bool).to(device) #need to mask future langauge tokens to be predicted in Xattn since this is the first attention layer they pass through. 1 means masked, 0 means not masked
+            for b in range(batch_size):
+                # get past frames from t up to 128 before
+                newest_frame_ms = ob_frames['ms'][b,t]
+                # crop input words at 2048 tokens
+                newest_word_index = th.max(th.where(ob_words['ms'][b])<=newest_frame_ms)
+                first_word_index = max(0, newest_word_index-2048)
+                # add word padding so sentences with different lengths work
+                word_padding_mask_tensor[b, first_word_index:newest_word_index] = 1
+                # construct cross-attention mask
+                Xattn_mask[b:b*16, first_word_index:newest_word_index,:] = 0 # mask future language tokens, dont mask frames. Thereforem every frame can see all previous language tokens. actually these things are already masked by th.ones(), this line unmasks the active areas.
 
-            # frames in context. get last 128 from selected frame
-            # if referencing index -n, crop to first frame
-            x2 = x2_[max(-2048, -x2.shape[1]):t]
+            # frames in context. get last 128 from selected frame (actually form VPT transformer layer 1 output)
+            # and feed to LM.
+            # @ be sure to fix thsi frame selection to work with however masking is done in VPT
+            x2 = x2_[max(0, t-128):t]
             
 
 
                 
 
 
-            # convert word token ids to embeddings. since LM(words) works from token_indices and we need to pass
-            # VPT representations as raw vectors, we need to use LM(words, from_embeddings=True),
-            # which requires us to pre-embed to token ids
-            l = self.LM.model.decoder.embed_tokens(token_ids_in_context)      # for more performance, edit so that we work on ful LM embeddings (1024) rather then word representations (512), i.e. work just before positional embeddings are added, which are also 1024 big.
-            l = self.LM.model.decoder.project_in(l)
+
 
             # FUSE VPT_transformer_layer_1_output & language_input_tokens via gated-cross-attention. PASS into LM
             # PASS VPT_transformer_layer_1 OUTPUT AND WORDS THROUGH LM
-            Xattn_mask = th.zeros(l.shape[1], x.shape[1]).to(device) #need to mask future langauge tokens to be predicted in Xattn since this is the first attention layer they pass through
-            Xattn_mask[-1,:] = 1
-            l = self.Xattn_VPT_LM(x=x2, y=l, attn_mask=Xattn_mask) # repeat for each timestep
+
+            l = self.Xattn_VPT_LM(x=x2, y=input_embeddings, attn_mask=Xattn_mask) # repeat for each timestep, since every timestep the LM has different frames to work with, so must give an updated response
 
             # LM PREDICT OUTPUTS (for word prediction and to give to agent)
-            l = self.LM.model.forward(inputs_embeds=l, project_embeds=False, token_ids_padding)['last_hidden_state'] # OPT has causal masking built-in, but need to add padding mask for batch_size>1 @batch1.   # OPT FILES HAVE BEEN MODIFIED. USING 350M AND OTHERS, MODEL EMBEDDING SIZE IS 1024, BUT WORDS EMBEDDINGS INPUTS ARE TO BE 512 AND CAST UP AT INPUT. FOR BETTER PERFORMANCE< NEED TO HAVE ACCESS TO FULL MODEL EMBEDDING SIZE SO VPT INFO (2048) DOESNT GET SQUISHED TO 512 THEN SCALED UP AGAIN. ADDED INPUT TO FORWARD CALLED 'project_embeds' to make model accept  full embeddings. requires projecting words embedding earlier, but  after that we have access to modifying that to pass in full 1024 embeddings
-            LM_out[t] = l[:,-1,:]    # CROSS ATTENTION ALL LM TOKENS OUT WITH VPT OR JUST LAST - JUST LAST, past tokens have already had their chance to be last, if info important it can be rereouted #@batch1 - adjust for padding
+            l = self.LM.model.forward(inputs_embeds=l, project_embeds=False, attention_mask=word_padding_mask_tensor)['last_hidden_state'] # OPT has causal masking built-in, but need to add padding mask for batch_size>1 @batch1.   # OPT FILES HAVE BEEN MODIFIED. USING 350M AND OTHERS, MODEL EMBEDDING SIZE IS 1024, BUT WORDS EMBEDDINGS INPUTS ARE TO BE 512 AND CAST UP AT INPUT. FOR BETTER PERFORMANCE< NEED TO HAVE ACCESS TO FULL MODEL EMBEDDING SIZE SO VPT INFO (2048) DOESNT GET SQUISHED TO 512 THEN SCALED UP AGAIN. ADDED INPUT TO FORWARD CALLED 'project_embeds' to make model accept  full embeddings. requires projecting words embedding earlier, but  after that we have access to modifying that to pass in full 1024 embeddings
+            
+            LM_only_output_last_token_to_VPT = False
+            if LM_only_output_last_token_to_VPT:
+                is_in_context = ob_words['ms']<=ob_frames['ms']
+                final_indices=th.zeros(ob_words['ms'].shape, dtype=th.bool)
+                batch_size=3
+                for b in range(batch_size):
+                    true_indices_b = th.where(is_in_context[b]==True)[0]
+                    max_ = max(true_indices_b)
+                    final_indices[b, max_]=True
+                last_LM_outputs = ob_words['ms'][final_indices]
+                LM_raw_out[t] = 
+            else:
+                LM_raw_out[t] = l    # CROSS ATTENTION ALL LM TOKENS OUT WITH VPT OR JUST LAST - JUST LAST, past tokens have already had their chance to be last, if info important it can be rereouted #@batch1 - adjust for padding
 
             # LM PREDICT WORD (for language modelling loss)
-            LM_head = l.clone()
-            LM_head = self.LM.model.decoder.project_out(LM_head)
-            LM_head = self.LM.lm_head(LM_head)
-            word_out[t] = LM_head[:,-1,:]    # word out is last word of all batches, get full embedding. @ FIX - last word may just be padding. ADJUST FOR PADDING @batch1
+            LM_head_output = l.clone()
+            LM_head_output = self.LM.model.decoder.project_out(LM_head_output)
+            LM_head_output = self.LM.lm_head(LM_head_output)
 
-        LM_out_t = th.asarray(LM_out).to(device)
-        word_pd = th.asarray(word_out).to(device)
+            # outputs [n_words before frame] words for every frame. outputs of shape [batch, ]
+
+
+        LM_out_t = th.asarray(LM_raw_out, requirems_gradient=True).to(device)
+        word_pd = th.asarray(word_out, requirems_gradient=True).to(device)
 
         # GATED CROSS ATTENTION: LM OUTPUT AND VPT-transformer-layer-1 OUTPUT
         # Since this input is going to VPT, ans it is important that the input it sees as init is no diffrent from vanilla VPT.
         # so language is passed as queries and VPT tokens are passed at keys/values.
         x = self.Xattn_LM_VPT(x=LM_out_t, y=x)
 
-        # -------------------------------- INSERT LM
-
+        # -------------------------------- end of INSERT LM
 
 
 
@@ -354,7 +383,7 @@ class MinecraftPolicy(nn.Module):
 class MinecraftAgentPolicy(nn.Module):
     def __init__(self, action_space, policy_kwargs, pi_head_kwargs, device):
         super().__init__()
-        self.net = MinecraftPolicy(**policy_kwargs)
+        self.net = MinecraftPolicy(device, **policy_kwargs)
 
         self.action_space = action_space
 
@@ -443,7 +472,7 @@ class MinecraftAgentPolicy(nn.Module):
 
 
 
-    def get_output_for_observations(self, ob_words, ob_frames):
+    def get_output_for_observations(self, ob_words, ob_frames, VPT_state_in=None, dummy_first=Nones):
         """
         Return gradient-enabled outputs for a sequence of frames.
 
@@ -461,14 +490,15 @@ class MinecraftAgentPolicy(nn.Module):
         dummy_first = th.zeros((ob_frames['img'].shape[0], ob_frames['img'].shape[1]), dtype=th.bool).to(self.device)
 
         # set state to zero
-        state_in = self.initial_state(1)
+        if not VPT_state_in:
+            VPT_state_in = self.initial_state(1)
 
         # pass through agent NN
         (pd_action, vpred_action, _), pd_word, VPT_state_out = self(
             ob_words=ob_words,
             ob_frames=ob_frames,
             first=dummy_first,
-            VPT_state_in=state_in,
+            VPT_state_in=VPT_state_in,
         )
 
         return pd_action, self.value_head.denormalize(vpred_action), pd_word
@@ -734,9 +764,9 @@ class InverseActionPolicy(nn.Module):
 
  # -------------------------------- INSERT LM INTO VPT
  every frame, we need to have data from the new frame going through the language model and into the 
- next VPT layer. This needs to be done even when there is not a new langauge token with a frame,
- Because of how cross attention works, this means that the frame can nor cross attend with any new token in
-, compared to how when a new token comes into a regular self attention layer it always gets attention.
+ next VPT layer. This needs to be done even when there is not a new langauge token with a frame.
+ Because of how cross attention works in standard casual LM training, this means that a frame without a corresponding langauge token can not
+ be cross attended with.
 e.g. when the last word was 10 secs ago, how do we get the latest fame into the LM when it has no new langauge token
 to be attended by?
 
@@ -746,11 +776,15 @@ we can either:
     - With WPM of 150 and context of 2048, we can see 2048 language tokens reaching back about 10.2 minutes
 
     - add silence tokens so that every new frame has a language token to attend to it. this is far more efficient and faster,
-    requiring only 1 pass through a transformer as opposed to re-calculating all old tokens.
+    every frame only requires only 1 pass through a the LM to be done as opposed to having to re-calculate all old langauge tokens too.
     HOWEVER: this also means that silence tokens now take up the majority of the 2048 token context, 
     both creating a lot of noise inthe dataset that is very different from LM pretraining and may result in cmopromised performance,
     and also, at e.g. 150WPM, only 16% of tokens are actual language signals, the rest is silence, so at 150WPM we can
     only see about 350 tokens each pass, and only see about 2 minutes into the past
+    - may be do this in a way such that every other frame is copied from the previous. This way 1/2 the silence tokens are used, besides alngauge is probably slow
+    - doing this langauge-token-per-frame, and reduce rate of langauge model interaction (repeating rpevious output until next) is much easier to implement and clearner, proably more performant.
+        only issue is how to deal with: 2 words said during blank interval. now langauge model takes in previous 1/2 frames and which langauge token?
+
 
         # frames and words MUST be passed matched. e,g. if frames = [f0,f1,f2,f3]
                                                             words = [w0,w1,w2,w3]

@@ -161,9 +161,40 @@ class MineRLAgent:
         return video_obs
 
     def _words_to_agent(self, words, ms):
-        tokens = self.tokenizer(words, return_tensors="pt")
-        tokens['ms'] = ms
-        return tokens
+
+        batch_size = len(words) # words is a list of strings, each string is the language input over a section of video. The words must line up with the video frames being fed into the model
+        max_len = 0
+        for b in range(len(words)):
+            if len(words[b])> max_len:
+                max_len = len(words[b])
+
+        # word must be a list of the word trajectories to allow batch >=1
+        # returns a dictionary including:
+            # token_ids: tensor of token ids. shape [number_trajectories, number_words in trajectory]
+            # ms: tensor of when tokens occurred in time in ms (inf if no word) shape [number_trajectories, number_words in trajectory]
+            # mask: tensor of when words end, used for padding masking
+
+
+        token_ids_tensor = th.zeros([batch_size, max_len], dtype=th.LongTensor).to(self.device)
+        padding_mask_tensor = th.zeros([batch_size, max_len]).to(self.device)
+        ms_tensor = th.full([batch_size, max_len], float('inf')).to(self.device) # set to inf so that padded words never match with frame occurences.
+
+        # for every batch, get sentence, tokenize, pad, format ms
+        for b in range(len(words)):
+
+            token_ids = self.tokenizer(words[b])["token_ids"] # IF WORD INPUT IS EMPTY, NO FRAMES CAN PASS THROUGH LM. ALWAYS PASS AT LEAST BOS TOKEN SO IT ALWAYS ALLOWS INFORMATION EVEN WITHOUT LANGUAGE. FOR OPT/GPT2/GPT3 THIS IS TOKEN_ID=2. THIS IS ALREADY DONE IN THIS TOKENIZER.
+
+            token_ids_tensor[b,0:len(token_ids)] = token_ids
+
+            padding_mask_tensor[b,0:len(token_ids)] = 1     # THIS WILL THROW A WARNING IF YOU PASS A WORD OBSERVATION WITH >2048 WORDS
+
+            ms_tensor[b,0:len(token_ids)] = ms[b]
+
+        word_obs = { "token_ids":token_ids_tensor,
+                    "mask_padding":padding_mask_tensor, 
+                    "ms":ms_tensor }
+
+        return word_obs
 
     def _agent_words_to_string(self, words):
         strings = self.tokenizer.decode(words)    

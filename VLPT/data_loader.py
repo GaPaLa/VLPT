@@ -78,8 +78,18 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
             json_data = "[" + ",".join(json_lines) + "]"
             json_data = json.loads(json_data)
         
+
+        with audiofile as audiofile:
+            # USE OPENAI WHISPER https://github.com/openai/whisper/discussions/3 TO GET TRANSCIPT + ms timestamps
+            words = 
+            word_ms = 
+
+
         frame_timestamp=0
-        for i in range(len(json_data)):
+        all_frames = []
+        all_actions = []
+
+        for i in range(len(json_data)):  # FOR EVERY ACTION, CREATE [previous frame sequence: 128] [previous word sequence: 2048] [previous action sequence: 128]
             if quit_workers_event.is_set():
                 break
             step_data = json_data[i]
@@ -97,6 +107,7 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
                 step_data["mouse"]["buttons"] = [button for button in step_data["mouse"]["buttons"] if button != 0]
 
             action, is_null_action = json_action_to_env_action(step_data)
+            all_actions.append(action)
 
             # Update hotbar selection
             current_hotbar = step_data["hotbar"]
@@ -106,7 +117,7 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
 
             # Read frame even if this is null so we progress forward
             ret, frame = video.read()
-            frame_timestamp += 1000/20
+            frame_timestamp += 1000/20 #frame occurence timestamp is in ms. assumes frames coming in at 20Hz
             if ret:
                 # Skip null actions as done in the VPT paper
                 # NOTE: in VPT paper, this was checked _after_ transforming into agent's action-space.
@@ -121,10 +132,27 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
                 cv2.cvtColor(frame, code=cv2.COLOR_BGR2RGB, dst=frame)
                 frame = np.asarray(np.clip(frame, 0, 255), dtype=np.uint8)
                 frame = resize_image(frame, AGENT_RESOLUTION)
-                
-                output_queue.put((trajectory_id, frame, word, action), timeout=QUEUE_TIMEOUT)
+                all_frames.append(frame)
             else:
                 print(f"Could not read frame from video {video_path}")
+
+
+            # for sequence of [frames,framesms, words,wordsms, actions], for every timestep, get sequence of 128 most recent frames and most recent 2048 words - GET 2048 FOR EACH FRAME - meaning get most raecent as of last frame, and 2048 previous words from last frame
+            # get 128 frames
+            start_frame_index = max(0, len(all_frames)-128)
+            end_frame_index = len(all_frames)
+            sample_frames = all_frames[start_frame_index:end_frame_index]
+            # get 2048 words
+            most_recent_word_from_most_recent_frame_index = max(np.where(np.asarray(word_ms)<=frame_timestamp ))
+            most_recent_word_from_least_recent_frame_index = max(np.where(np.asarray(word_ms)<=frame_timestamp-(  (end_frame_index-start_frame_index)*(1000/20)) ))
+            start_word_index = max(0, most_recent_word_from_least_recent_frame_index-2048)
+            sample_words = word_ms[start_word_index:most_recent_word_from_most_recent_frame_index]
+            # get 128 actions (1 actions output per frame)
+            sample_actions = all_actions[start_frame_index:end_frame_index]
+            # save sequence sample to  
+            output_queue.put((trajectory_id, sample_frames.copy(), sample_words, sample_actions), timeout=QUEUE_TIMEOUT)
+
+
         video.release()
         if quit_workers_event.is_set():
             break
