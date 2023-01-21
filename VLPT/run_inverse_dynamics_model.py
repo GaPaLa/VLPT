@@ -125,7 +125,7 @@ def json_action_to_env_action(json_action):
     return env_action, is_null_action
 
 
-def main(model, weights, video_path, json_path, n_batches, n_frames):
+def main(model, weights, video_path, json_path, batch_size):
     print(MESSAGE)
     agent_parameters = pickle.load(open(model, "rb"))
     net_kwargs = agent_parameters["model"]["args"]["net"]["args"]
@@ -143,25 +143,53 @@ def main(model, weights, video_path, json_path, n_batches, n_frames):
         json_data = "[" + ",".join(json_lines) + "]"
         json_data = json.loads(json_data)
 
-    for _ in range(n_batches):
+    current_frame = 0
+    end_frame = False
+    # get 128 batches
+    while not end_frame:
         th.cuda.empty_cache()
         print("=== Loading up frames ===")
         frames = []
         recorded_actions = []
-        for _ in range(n_frames):
-            ret, frame = cap.read()
-            if not ret:
-                break
-            assert frame.shape[0] == required_resolution[1] and frame.shape[1] == required_resolution[0], "Video must be of resolution {}".format(required_resolution)
-            # BGR -> RGB
-            frames.append(frame[..., ::-1])
-            env_action, _ = json_action_to_env_action(json_data[json_index])
-            recorded_actions.append(env_action)
-            json_index += 1
-        frames = np.stack(frames)
-        print("=== Predicting actions ===")
-        predicted_actions = agent.predict_actions(frames)
 
+        for _ in range (batch_size):
+            # get next [batch size] 64 frames (128 if first, however many possible if reach end (<=128))
+            if current_frame==0:
+                n_frames_to_get = 128
+            else:
+                n_frames_to_get = 64
+            for _ in range(n_frames_to_get):
+                ret, frame = cap.read()
+                if not ret:
+                    end_frame = True
+                    break
+                assert frame.shape[0] == required_resolution[1] and frame.shape[1] == required_resolution[0], "Video must be of resolution {}".format(required_resolution)
+                # BGR -> RGB
+                frames.append(frame[..., ::-1])
+                env_action, _ = json_action_to_env_action(json_data[json_index])
+                recorded_actions.append(env_action)
+                json_index += 1
+            frames = np.stack(frames)
+
+
+        # predict next [batch size]x 64 frames. (give 128 frames each batch)
+        print("=== Predicting actions ===")
+        frames_batch = th.zeros([batch_size,128,128,3])
+        for _ in range(batch_size):
+            start_action_index = 0
+            end_action_index = 0
+
+            predicted_actions_window = []
+ 
+        predicted_actions = agent.predict_actions(batch_frames)       # @ THIS LINE IS DIFFERENT; in the paper they onyl take the middle predicted action as the estimated action from IDM so that it has more surrounding context. edit this appropriately.
+        """we apply the IDM over a
+        video using a sliding window with stride 64 frames and only use the pseudo-label prediction for
+        frames 32 to 96 (the center 64 frames). By doing this, the IDM prediction at the boundary of the
+        video clip is never used except for the first and last frames of a full video."""
+        ### !thankfully IDM model is not  transformerXL - all internal hidden_states past to itself are None, so we can just convolve it without worrying about weird reucrrence order stuff being messed up
+
+        # display frames predicted
+        display_frames = False
         for i in range(n_frames):
             frame = frames[i]
             recorded_action = recorded_actions[i]
@@ -188,6 +216,9 @@ def main(model, weights, video_path, json_path, n_batches, n_frames):
             # RGB -> BGR again...
             cv2.imshow("MineRL IDM model predictions", frame[..., ::-1])
             cv2.waitKey(0)
+
+
+
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
