@@ -6,7 +6,7 @@ from gym import spaces
 
 from lib.action_mapping import CameraHierarchicalMapping, IDMActionMapping
 from lib.actions import ActionTransformer
-from lib.policy import InverseActionPolicy
+from lib.IDM_policy import InverseActionPolicy
 from lib.torch_util import default_device_type, set_default_torch_device
 from agent import resize_image, AGENT_RESOLUTION
 
@@ -51,12 +51,22 @@ class IDMAgent:
         """Reset agent to initial state (i.e., reset hidden state)"""
         self.hidden_state = self.policy.initial_state(1)
 
-    def _video_obs_to_agent(self, video_frames):
-        imgs = [resize_image(frame, AGENT_RESOLUTION) for frame in video_frames]
-        # Add time and batch dim
-        imgs = np.stack(imgs)[None]
-        agent_input = {"img": th.from_numpy(imgs).to(self.device)}
+
+
+
+    def _video_obs_to_agent(self, video_frames, raw_frames=False):
+        if raw_frames:
+            agent_input = {"img": th.from_numpy(video_frames).to(self.device)}
+        else:
+            imgs = [resize_image(frame, AGENT_RESOLUTION) for frame in video_frames]
+            # Add time and batch dim
+            imgs = np.stack(imgs)[None]
+            agent_input = {"img": th.from_numpy(imgs).to(self.device)}
+            
         return agent_input
+
+
+
 
     def _agent_action_to_env(self, agent_action):
         """Turn output from policy into action for MineRL"""
@@ -71,7 +81,7 @@ class IDMAgent:
         minerl_action_transformed = self.action_transformer.policy2env(minerl_action)
         return minerl_action_transformed
 
-    def predict_actions(self, video_frames):
+    def predict_actions(self, video_frames, raw_frames=False):
         """
         Predict actions for a sequence of frames.
 
@@ -82,16 +92,25 @@ class IDMAgent:
         Agent's hidden state is tracked internally. To reset it,
         call `reset()`.
         """
-        agent_input = self._video_obs_to_agent(video_frames)
+        agent_input = self._video_obs_to_agent(video_frames, raw_frames)
+
         # The "first" argument could be used to reset tell episode
         # boundaries, but we are only using this for predicting (for now),
         # so we do not hassle with it yet.
-        dummy_first = th.zeros((video_frames.shape[0], 1)).to(self.device)
-        predicted_actions, self.hidden_state, _ = self.policy.predict(
+        dummy_first = th.zeros((agent_input['img'].shape[0], 1), dtype=th.bool).to(self.device)
+
+        hidden_state = self.policy.initial_state(agent_input['img'].shape[0])       # always use 
+
+        predicted_actions, hidden_state, _ = self.policy.predict(
                                                                     agent_input,
                                                                     first=dummy_first, 
-                                                                    state_in=self.hidden_state,
+                                                                    state_in=hidden_state,
                                                                     deterministic=True
         )
-        predicted_minerl_action = self._agent_action_to_env(predicted_actions)
-        return predicted_minerl_action
+
+        print('hidden state:',hidden_state)
+        
+        # return raw agent action for easier transport of data to training regime
+        #predicted_minerl_action = self._agent_action_to_env(predicted_actions)
+        #return predicted_minerl_action
+        return predicted_actions

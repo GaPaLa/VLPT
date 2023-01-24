@@ -125,10 +125,7 @@ def json_action_to_env_action(json_action):
     return env_action, is_null_action
 
 
-# give main a file and it will output all actios for all frames
-# improved efficieny using sliding window and only using middle predictions
-# when passing a video to  main, batch_size should be as large as possible
-def main(model, weights, video_path, json_path, batch_size):
+def main(model, weights, video_path, json_path):
     print(MESSAGE)
     agent_parameters = pickle.load(open(model, "rb"))
     net_kwargs = agent_parameters["model"]["args"]["net"]["args"]
@@ -151,10 +148,9 @@ def main(model, weights, video_path, json_path, batch_size):
     # the frames  variable cnotains the batch of frames to estimate actions from.
     # it is always ([batch size]x64 + 64) frames.
     # every iteration, the next [batch size]x64
-    frames = np.zeros([num_frames, 128, 128, 3])
-    all_predicted_actions = {'buttons':th.zeros([1,num_frames,20]), 'camera':th.zeros([1,num_frames,2])}
-    all_recorded_actions = th.zeros([num_frames])
-
+    frames_batch = th.zeros([128,128,128,3])
+    predicted_actions = []
+    recorded_actions = []
     # continuously get bunch of new frames and return actions until video is over
     current_frame = 0
     video_ended = False
@@ -162,65 +158,35 @@ def main(model, weights, video_path, json_path, batch_size):
         th.cuda.empty_cache()
         print("=== Loading up frames ===")
 
-        ### get next [batch size]x 64 frames (128 if first, however many possible if reach end (<=128)). each batch is size 128
-        b=0 # start b at 1 instead of 0, this way incoming frames do not overwrite the 64 frames of past context
-        while b<batch_size:
 
-            # if at first frame, get starting 64 frames in addition to batchx64 frames (to get to 128 frames)
-            # if not at first frame, increment b so that we dont overwrite the past context needed
-            if current_frame==0:
-                b=0 
-            elif b==0:
-                b=1
+        # if at first frame, get starting 64 frames in addition to batchx64 frames (to get to 128 frames)
+        # if not at first frame, increment b so that we dont overwrite the past context needed
+        frames_to_get = 64
+        if current_frame==0:
+            frames_to_get = 128
+        # add the amount of needed frames.
+        for t in range(frames_to_get):
+            ret, frame = cap.read()
+            if not ret:
+                video_ended = True
+                break
+            assert frame.shape[0] == required_resolution[1] and frame.shape[1] == required_resolution[0], "Video must be of resolution {}".format(required_resolution)
+            # BGR -> RGB
+            frames_batch[t+(128-frames_to_get)] = frame[..., ::-1] #is always 128 frames. first 64 frames get removed and next 64 are added on every ieration
+            env_action, _ = json_action_to_env_action(json_data[json_index])
+            recorded_actions.append(env_action)
+            json_index += 1
 
-            # add the amount of needed frames.
-            for t in range(64):
-                ret, frame = cap.read()
-                if not ret:
-                    video_ended = True
-                    break
-                assert frame.shape[0] == required_resolution[1] and frame.shape[1] == required_resolution[0], "Video must be of resolution {}".format(required_resolution)
-                # BGR -> RGB
-                frames[b*64+t] = frame[..., ::-1] #is always 128 frames. first 64 frames get removed and next 64 are added on every ieration
-                env_action, _ = json_action_to_env_action(json_data[json_index])
-                all_recorded_actions.append(env_action)
-                json_index += 1
-                current_frame += 1
-            b+=1
-        # organise next [batch size]x 64 frames. (give 128 frames to each batch)
         print("=== Predicting actions ===")
-        frames_batch = th.zeros([batch_size,128,128,3])
-        frame_1 = 0
-        frame_2 = 128
-        for b in range(batch_size):
-            frames_batch[b] = frames[frame_1:frame_2]
-            frame_1 += 64
-            frame_2 += 64
-
         # predict actions from 64 starter context and 64xbatch_size
-        action_pred = agent.predict_actions(frames_batch)       # @ THIS LINE IS DIFFERENT; in the paper they onyl take the middle predicted action as the estimated action from IDM so that it has more surrounding context. edit this appropriately.
-
-        # save batched results to linear sequence of actions
-        if current_frame == 64*batch_size+64: #(if this is the first batch, we need to save first actions taht would normally be cropped since the are not in the middle)
-            all_predicted_actions['buttons'][0:96] = action_pred['buttons'][0,0:96] # if first frame, predict actions 0 through 32 despite not being centred. remove last 32 frames since this can be estimated windowed
-            all_predicted_actions['camera'][0:96] = action_pred['camera'][0,0:96] # if first frame, predict actions 0 through 32 despite not being centred. remove last 32 frames since this can be estimated windowed            
-            all_predicted_actions['buttons'][96:current_frame] = action_pred[1:,32:96]['buttons'].reshape([batch_size*63,20])
-            all_predicted_actions['camera'][96:64*batch_size+64] = action_pred[1:,32:96]['camera'].reshape([batch_size*63,2])
-        elif video_ended: #(if this is the last batch, we need to save the last actions taht would normally be cropped since the are not in the middle)
-            remainder = num_frames%128
-            start = (current_frame - 64*batch_size) + remainder
-            end = start + 63*batch_size
-            all_predicted_actions['buttons'][start*batch_size+64] = action_pred[:-1,32:96]['buttons'].reshape([batch_size*63,20])   # at end frame, get all middle values froma l lbatches except last, whch will have been cut short
-            all_predicted_actions['camera'][96:64*batch_size+64] = action_pred[:-1,32:96]['camera'].reshape([batch_size*63,2])
-            start = end
-            end = num_frames
-            all_predicted_actions['buttons'][start:end] = action_pred['buttons'][-1,0:128-remainder] # if first frame, predict actions 0 through 32 despite not being centred. remove last 32 frames since this can be estimated windowed
-            all_predicted_actions['camera'][start:end] = action_pred['camera'][-1,0:128-remainder] # if first frame, predict actions 0 through 32 despite not being centred. remove last 32 frames since this can be estimated windowed
+        predicted_actions = agent.predict_actions(frames_batch)       # @ THIS LINE IS DIFFERENT; in the paper they onyl take the middle predicted action as the estimated action from IDM so that it has more surrounding context. edit this appropriately.
+        if current_frame == 0:
+            predicted_actions.append(predicted_actions[0,0:96]) # if first frame, predict actions 0 through 32 despite not being centred. remove last 32 frames since this can be estimated windowed
+            predicted_actions.append(predicted_actions[1:,32:96].reshape([batch_size*64]))
+        elif video_ended:
+            predicted_actions[batch_size-1,frame_2]=
         else:
-            start = current_frame - 64*batch_size
-            end = current_frame
-            all_predicted_actions['buttons'][start:end] = action_pred[:,32:96]['buttons'].reshape([batch_size*64,20])
-            all_predicted_actions['camera'][start:end] = action_pred[:,32:96]['camera'].reshape([batch_size*64,2])
+            predicted_actions = predicted_actions[] # get centre values
 
 
 
@@ -248,7 +214,7 @@ def main(model, weights, video_path, json_path, batch_size):
                 (255, 255, 255),
                 1
             )
-            for y, (action_name, action_array) in enumerate(action_pred.items()):
+            for y, (action_name, action_array) in enumerate(predicted_actions.items()):
                 current_prediction = action_array[0, i]
                 cv2.putText(
                     frame,
@@ -264,7 +230,7 @@ def main(model, weights, video_path, json_path, batch_size):
             cv2.waitKey(0)
 
     cv2.destroyAllWindows()
-    assert action_pred.shape[1] == current_frame+1
+    assert predicted_actions.shape[1] == current_frame+1
 
 
 if __name__ == "__main__":

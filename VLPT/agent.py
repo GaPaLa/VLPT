@@ -6,10 +6,10 @@ from gym import spaces
 
 from lib.action_mapping import CameraHierarchicalMapping
 from lib.actions import ActionTransformer
-from lib.policy import MinecraftAgentPolicy
+from lib.VLPT_policy import MinecraftAgentPolicy
 from lib.torch_util import default_device_type, set_default_torch_device
 
-from transformers import GPT2Tokenizer
+from transformers import TransfoXLTokenizer
 
 # Hardcoded settings
 AGENT_RESOLUTION = (128, 128)
@@ -108,6 +108,7 @@ class MineRLAgent:
     def __init__(self, env, device=None, policy_kwargs=None, pi_head_kwargs=None):
         validate_env(env)
 
+        ## args
         if device is None:
             device = default_device_type()
         self.device = th.device(device)
@@ -116,21 +117,24 @@ class MineRLAgent:
         self.action_mapper = CameraHierarchicalMapping(n_camera_bins=11)
         action_space = self.action_mapper.get_action_space_update()
         action_space = DictType(**action_space)
-
         self.action_transformer = ActionTransformer(**ACTION_TRANSFORMER_KWARGS)
-
         if policy_kwargs is None:
             policy_kwargs = POLICY_KWARGS
         if pi_head_kwargs is None:
             pi_head_kwargs = PI_HEAD_KWARGS
-
         agent_kwargs = dict(policy_kwargs=policy_kwargs, pi_head_kwargs=pi_head_kwargs, action_space=action_space, device=device)
-
         self.policy = MinecraftAgentPolicy(**agent_kwargs).to(device)
-        self.hidden_state = self.policy.initial_state(1)
         self._dummy_first = th.from_numpy(np.array((False,))).to(device)
 
-        self.tokenizer = GPT2Tokenizer.from_pretrained('facebook/opt-350m')
+        # LM
+        self.tokenizer = TransfoXLTokenizer.from_pretrained("transfo-xl-wt103")
+        self.BOS = 2
+
+        # hidden state management
+        self.VPT_hidden_state = self.policy.initial_state(1)
+        self.LM_hidden_state = None
+        self.LM_word_context = th.full([1,1],self.BOS, dtype=th.bool)
+        self.current_timestep=0
 
     def load_weights(self, path):
         """Load model weights from a path, and reset hidden state"""
@@ -138,8 +142,10 @@ class MineRLAgent:
         self.reset()
 
     def reset(self):
-        """Reset agent to initial state (i.e., reset hidden state)"""
-        self.hidden_state = self.policy.initial_state(1)
+        """Reset agent to initial state (i.e., reset hidden state) during inference. Does not work with batch_size>1"""
+        self.VPT_hidden_state = self.policy.initial_state(1)
+        self.LM_word_context = th.full([1,1],self.BOS, dtype=th.bool)
+        self.current_timestep=0
 
     def _env_obs_to_agent(self, minerl_obs):
         """
@@ -170,9 +176,9 @@ class MineRLAgent:
         # therefore, every frame is paired with the word before (every word is paired with the )
 
 
-        LM_TIMEOUT = 4
+        LM_TIMEOUT = 2
         FRAMERATE = 20
-        SILENCE_TOKEN_ID = 1437 # 1437 is space token. best performing accoding to rough experiments on gutenber performance with different random tokns inserted at the same positions. # IF TRANSCRIBER GIVE NO COMMA, USE COMMA. comma=6. newline character=50118. single space=1437 luckily, in this tokenizer, stray spaces are classified as separate characters isntead of extensions of real word parts, so it is an intuitive 1:1 translation of extra spaces from human langauge to model. Hopefully it is therefore much easier to learn! # TEST: INSERT TOKENS AS NOISE TO NORMAL LANGUAGE INPUT AND SEE WHICH IS LEAST DESTRUCTIVE TO PERFORMANCE
+        SILENCE_TOKEN_ID = 2 # 2 in transfo_xl is ','. performs second best to ' ', but transfo_xl has no ' ' token since it is word-level tokenizer. #1437 in OPT is space token. best performing in OPT accoding to rough experiments on gutenber performance with different random tokns inserted at the same positions. # IF TRANSCRIBER GIVE NO COMMA, USE COMMA. comma=6. newline character=50118. single space=1437 luckily, in this tokenizer, stray spaces are classified as separate characters isntead of extensions of real word parts, so it is an intuitive 1:1 translation of extra spaces from human langauge to model. Hopefully it is therefore much easier to learn! # TEST: INSERT TOKENS AS NOISE TO NORMAL LANGUAGE INPUT AND SEE WHICH IS LEAST DESTRUCTIVE TO PERFORMANCE
         num_frames = ob_frames['img'].shape[1]
 
         ## convert word input to tensor
@@ -266,22 +272,37 @@ class MineRLAgent:
         return action
 
     # RL inference
-    def get_action(self, minerl_obs, words_context):
+    # can pass text to start the model off with as plaintext e.g. 'Hi guys today I'm going to build a house'
+    def get_action(self, minerl_obs, starter_words=None):
 
         # allow for passing starter word context, but the model generates its own tokens and feeds them back into the context as it runs
         """
         Get agent's action for given MineRL observation.
 
-        Agent's hidden state is tracked internally. To reset it,
+        Agent's hidden state is tracked internally (within this class). To reset it,
         call `reset()`.
         """
-        agent_input = self._env_obs_to_agent(minerl_obs)
+
+
+
+        if starter_words:
+            starter_words = self.tokenizer(starter_words)['input_ids']
+            self.word_context = th.tensor(starter_words).reshape([1,len(starter_words)], dtype=th.bool)
+
+
+
+        current_frame = self._env_obs_to_agent(minerl_obs)
         # The "first" argument could be used to reset tell episode
         # boundaries, but we are only using this for predicting (for now),
         # so we do not hassle with it yet.
-        agent_action, self.hidden_state, _ = self.policy.act(
-            agent_input, self._dummy_first, self.hidden_state,
-            stochastic=True
-        )
+        agent_action, self.VPT_hidden_state, _, self.LM_hidden_state, self.LM_word_context = self.policy.act(
+                                                                                                            current_frame, 
+                                                                                                            self._dummy_first, 
+                                                                                                            self.VPT_hidden_state,
+                                                                                                            self.LM_hidden_state,
+                                                                                                            self.LM_word_context,
+                                                                                                            self.current_timestep,
+                                                                                                            stochastic=True ####### @try deterministc?
+                                                                                                            )
         minerl_action = self._agent_action_to_env(agent_action)
         return minerl_action

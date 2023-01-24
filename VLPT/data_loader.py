@@ -78,17 +78,23 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
             json_data = "[" + ",".join(json_lines) + "]"
             json_data = json.loads(json_data)
         
+        token_ids = []
+        word_ms = []
+        with open(transcribed_path) as words_data:
+            while words_data.hasnext():
+                line = words_data.readline()
+                line = line.split(',')
+                token_ids.append( int(line[0]) )
+                word_ms.append( int(line[1]) )
+        word_ms = np.asarray(word_ms)
+        token_ids = np.asarray(token_ids)
 
-        with audiofile as audiofile:
-            # USE OPENAI WHISPER https://github.com/openai/whisper/discussions/3 TO GET TRANSCIPT + ms timestamps
-            words = 
-            word_ms = 
+                     
 
 
-        frame_timestamp=0
+        frame_ms = -50
         all_frames = []
         all_actions = []
-
         for i in range(len(json_data)):  # FOR EVERY ACTION, CREATE [previous frame sequence: 128] [previous word sequence: 2048] [previous action sequence: 128]
             if quit_workers_event.is_set():
                 break
@@ -117,12 +123,21 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
 
             # Read frame even if this is null so we progress forward
             ret, frame = video.read()
-            frame_timestamp += 1000/20 #frame occurence timestamp is in ms. assumes frames coming in at 20Hz
+            frame_ms += 50 #frame occurence timestamp is in ms. assumes frames coming in at 20Hz
+
+            # check if there is a word at this frame or not
+            current_word_index = word_ms.where(word_ms>=frame_ms-50 & word_ms<frame_ms)
+            if current_word_index == True:
+                current_word = token_ids[current_word]
+            else:
+                current_word = None
+
             if ret:
                 # Skip null actions as done in the VPT paper
                 # NOTE: in VPT paper, this was checked _after_ transforming into agent's action-space.
                 #       We do this here as well to reduce amount of data sent over.
-                if is_null_action:
+                if is_null_action and current_word==None:   #@@@@@@ REMOVING ACTIONS MESSES WITH WORD TIMING IF A WORD OCCURS DURING THAT NULL ACTION - SO WE DONT REMOVE ALL NULL ACTIONS, instead, we mask the target action so VPT is not trained to output null. ONLY REMOVE A NULL ACTION if no wor occurs during it. @@@@ WARNING. THSI GREATLY SPEEDS UP WPM, ADJUST D ACCORDINGLY AFTER MEASURING IT.
+                    word_ms[frame_ms:] -= 50 # since a frame has been removed, video is shifted by 50ms. need to shift audio/words by 50 to compensate. Dont need to adjust frame_ms since thats only used to keep causal and word/frame timings workling, which this line maintains anyway
                     continue
                 if step_data["isGuiOpen"]:
                     camera_scaling_factor = frame.shape[0] / MINEREC_ORIGINAL_HEIGHT_PX
@@ -136,26 +151,28 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
             else:
                 print(f"Could not read frame from video {video_path}")
 
+        #@ after all frmaes, words and actions calculated, get non overlapping trajectories of 2048 frames, words, and actions
+        # for sequence of frames, framesms, words, wordsms, actions, for every timestep, get sequence of 2048 most recent frames and most recent 2048 words - GET 2048 FOR EACH FRAME - meaning get most raecent as of last frame, and 2048 previous words from last frame
+        # get 128 frames
+        start_frame_index = max(0, len(all_frames)-2048)
+        end_frame_index = len(all_frames)
+        sample_frames = all_frames[start_frame_index:end_frame_index]
+        # get 2048 words
+        most_recent_word_from_most_recent_frame_index = max(np.where(np.asarray(word_ms)<=frame_ms ))
+        most_recent_word_from_least_recent_frame_index = max(np.where(np.asarray(word_ms)<=frame_ms-(  (end_frame_index-start_frame_index)*(1000/20)) ))
+        start_word_index = max(0, most_recent_word_from_least_recent_frame_index-2048)
+        sample_words = word_ms[start_word_index:most_recent_word_from_most_recent_frame_index]
+        # get 128 actions (1 actions output per frame)
+        sample_actions = all_actions[start_frame_index:end_frame_index]
 
-            # for sequence of [frames,framesms, words,wordsms, actions], for every timestep, get sequence of 128 most recent frames and most recent 2048 words - GET 2048 FOR EACH FRAME - meaning get most raecent as of last frame, and 2048 previous words from last frame
-            # get 128 frames
-            start_frame_index = max(0, len(all_frames)-128)
-            end_frame_index = len(all_frames)
-            sample_frames = all_frames[start_frame_index:end_frame_index]
-            # get 2048 words
-            most_recent_word_from_most_recent_frame_index = max(np.where(np.asarray(word_ms)<=frame_timestamp ))
-            most_recent_word_from_least_recent_frame_index = max(np.where(np.asarray(word_ms)<=frame_timestamp-(  (end_frame_index-start_frame_index)*(1000/20)) ))
-            start_word_index = max(0, most_recent_word_from_least_recent_frame_index-2048)
-            sample_words = word_ms[start_word_index:most_recent_word_from_most_recent_frame_index]
-            # get 128 actions (1 actions output per frame)
-            sample_actions = all_actions[start_frame_index:end_frame_index]
-            # save sequence sample to  
-            output_queue.put((trajectory_id, sample_frames.copy(), sample_words, sample_actions), timeout=QUEUE_TIMEOUT)
+        # save sequence sample to  
+        output_queue.put((trajectory_id, sample_frames.copy(), sample_words, sample_actions), timeout=QUEUE_TIMEOUT)
 
 
         video.release()
         if quit_workers_event.is_set():
             break
+
     # Tell that we ended
     output_queue.put(None)
 

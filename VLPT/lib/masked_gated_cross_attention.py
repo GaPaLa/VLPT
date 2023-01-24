@@ -42,20 +42,22 @@ class MaskedGatedCrossAttention(th.nn.Module):
             dtype=dtype)
         
         self.ffw = MLP(insize=embed_dim, nhidlayer=1, outsize=embed_dim, hidsize=ffw_dim, hidactiv=sqrelu, dtype=th.float32) #, dtype=th.float32)
-
+        self.num_heads = num_heads
         self.alpha_xattn = th.nn.Parameter(th.tensor(0.)) # xattn gating parameter – init at 0.
         self.alpha_dense  = th.nn.Parameter(th.tensor(0.)) # ffw gating parameter – init at 0.
 
         
     def forward(
         self,
-        x, # input 
-        y, # input
+        x, # input - keys
+        y, # input -  QUERY - input shape of this is output shape of cross-attention
         attn_mask = None
         ):
-        attn_mask = None
-        #print("xattn fwd: x input, y input:", x.shape, y.shape, "isNaN x, y:",th.isnan(x).any(),th.isnan(y).any(), end="")
-
+        att = attn_mask
+        
+        #if att != None:
+        #    att = attn_mask.shape
+        #print("xattn fwd: x input, y input, mask:", x.shape, y.shape, att, "isNaN x, y:",th.isnan(x).any(),th.isnan(y).any(), end="")
 
         """Applies a GATED XATTN-DENSE layer."""
 
