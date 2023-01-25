@@ -14,7 +14,7 @@ def sqrelu(x):
     return th.pow(relu, 2)
 
 
-# https://github.com/lucidrains/flamingo-pytorch/blob/main/flamingo_pytorch/flamingo_pytorch.py @
+# @ https://github.com/lucidrains/flamingo-pytorch/blob/main/flamingo_pytorch/flamingo_pytorch.py @
 class MaskedGatedCrossAttention(th.nn.Module):
 
     def __init__(

@@ -370,7 +370,7 @@ class SelfAttentionLayer(AttentionLayerBase):
             returns (cache, full), where
             - cache goes into the output state, length chosen so that on the
                 next timestep, there are enough cached timesteps to get the full
-                context of lenth self.maxlen.
+                context of lenth self.maxlen.                                                   # @ During inference, TransformerXL paper allow mem_len to be much larger, even 1600. Maybe try this during RL inference with VPT?
             - full is used for the current forward pass, with length chosen so
                 that the first timestep new[:, 0] gets to see a context of
                 self.maxlen.

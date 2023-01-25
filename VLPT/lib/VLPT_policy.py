@@ -183,13 +183,17 @@ class MinecraftPolicy(nn.Module):
             dense_init_norm_kwargs=self.dense_init_norm_kwargs,
             init_norm_kwargs=init_norm_kwargs,
             first_conv_norm=first_conv_norm,
-            **impala_kwargs,
-        )
+            **impala_kwargs)
         
+
         # Define Language Model
         self.LM = TransfoXLLMHeadModel.from_pretrained("transfo-xl-wt103") #, @later, load from stored weights
         self.LM.tie_weights() # necessary for this model)
+        LM_tgt_len=256 # determined by input size
+        LM_mem_len=LM_tgt_len # number of previous keys to cache
+        self.LM.transformer.config.mem_len = LM_mem_len
         
+
         # define cross atention layers from VPT->LM, LM->VPT
         self.Xattn_VPT_LM = MaskedGatedCrossAttention(
             embed_dim=self.LM.transformer.d_embed, # queries are lanuage tokens - LM gets appropriate size and number of tokens 
@@ -197,16 +201,15 @@ class MinecraftPolicy(nn.Module):
             num_heads=attention_heads,
             ffw_dim=hidsize*pointwise_ratio, # FFW hidden size should be same architecturally as FFW in LM (i.e. ratio between transformer token size and FFW hidden layer should be same) (x2 to account for multimodal tokens)
             batch_first=True,
-            dtype=th.float32
-        )
+            dtype=th.float32)
+
         self.Xattn_LM_VPT = MaskedGatedCrossAttention(
             embed_dim=hidsize, # queries are VPT tokens - VPT gets appropriate size and number of tokens
             kvdim=self.LM.transformer.d_embed,
             num_heads=attention_heads,
             ffw_dim=hidsize*pointwise_ratio, # use same as FFW (x2 to account for multimodal tokens)
             batch_first=True,
-            dtype=th.float32
-        )
+            dtype=th.float32)
 
         # VPT transformer layers
         self.recurrent_layer = ResidualRecurrentBlocks(
@@ -234,17 +237,17 @@ class MinecraftPolicy(nn.Module):
 
     # --------------       ---------------         -------------       -----------       KEY ARCHITECTURE DEFINITION
     ## NOTE OF HOW FORWARD WORKS AT END OF THIS CLASS:
-    def forward(self, ob_words, ob_frames, VPT_state_in, context, LM_state_in=None, LM_active_timestep=True, last_future_words=None):
-        LM_state_out=None
+    def forward(self, ob_words, ob_frames, VPT_state_in, context, LM_state=None, LM_active_timestep=True, last_future_words=None):
+        LM_state=None
+        assert not(LM_state==None and LM_active_timestep==False), "LM is inactive this timestep but no past LM outputs are available to feed in its place"
 
         ## useful stuff for later
-        num_frames = ob_frames['img'].shape[1]
-        num_words = ob_words['token_ids'].shape[1]
+        seq_len = ob_frames['img'].shape[1]
         batch_size = ob_frames['img'].shape[0]
-        print("words, frmes="+str(num_words)+" "+str(num_frames))
-        assert num_words==num_frames, "The frames and words tensors must match"
+        assert ob_words['token_ids'].shape[0:1]==ob_frames['img'].shape[0:1], "The frames and words tensors must match"
         first = context["first"]
         LM_TIMEOUT = 2 # referred to also as 'D'. LM gets input from VPT and gives output to VPT every D timesteps to reduce silence token noise.
+        LM_seq_len = max(1, seq_len//LM_TIMEOUT)
         
 
 
@@ -264,59 +267,56 @@ class MinecraftPolicy(nn.Module):
         
         ### copy VPT_transofrmer_layer1 output to pass the LM via cross-attention, leaving original output as residual around LM (as in Flamingo-style gated cross-attention. see: masked_gated_cross_atention.py)
         # implement LM timeout - D
-        LM_frames = x.clone()[:,::LM_TIMEOUT,:] #get every Dth frame. means that LM only sees as many framse as words i.e. frames are as spares as words. We CAN train on all past frames every langauge token, however, this results in 2048*D frames cross-attending with language token #2048 as opposed to just 2048 frames corss attending with langauge token #2048. Maybe that's okay? or preferable? It sounds expensive, ill do the sparse frames method. plus, this simplifies the X_attn mask #@r2
-        LM_in_words = ob_words['token_ids'][:,::LM_TIMEOUT] # crop word equally. This should have been modified by agent.py . words_to_agent() to only be silent tokens
+        x2 = x.clone() # changed to get every frame since due to more efficient mechanism and realise more data=more better #get every Dth frame. means that LM only sees as many framse as words i.e. frames are as spares as words. We CAN train on all past frames every langauge token, however, this results in 2048*D frames cross-attending with language token #2048 as opposed to just 2048 frames corss attending with langauge token #2048. Maybe that's okay? or preferable? It sounds expensive, ill do the sparse frames method. plus, this simplifies the X_attn mask #@r2
+        l = ob_words['token_ids'][:,::LM_TIMEOUT] # crop word equally. This should have been modified by agent.py . words_to_agent() to only be silent tokens
+        Xattn_mask=th.ones([l.shape[1], x2.shape[1]]) # create causal mask between language tokens and frames. every frame is paired with the previous word emitted, so that at the current frame we predic the next word from the current frame (and previous frames witha ttentions) and rpevious words. For more details look at agent.py words_to_agent() # since all sequeces in the batch (and every batch assuming constant D) have the same relation in terms of time with each other, all sequences can use the same Xattn mask
+        for q in range(l.shape[1]):
+            Xattn_mask[q, 0:q+LM_TIMEOUT] = 0   # @ DOUBLE CHECK THIS IS MASKING THE RIGHT WAY #@r2 - !if using each_LM_token_attends_to_all_past_frames-style x-attn (as opposed to only frames that occured during langauge token), modify this mask appropriately.
         
 
         ### convert input word token ids to embeddings. since LM(words) works from token_indices and we need to pass
         # VPT representations as raw vectors, we need to use LM(words, from_embeddings=True),
         # which requires us to pre-embed to token ids
-        word_embeddings = self.LM.transformer.word_emb(LM_in_words)
+        word_embeddings = self.LM.transformer.word_emb(l)
         
         ### Gated cross attention: FUSE output from VPT transformer layer 1 and language input tokens
         # need CAUSAL ATTENTION MASK in cross attention, so langauge tokens cant cross attend to future frames, since the inputted frames and words tensors both have future and past information relative to each other
         # frames and words are ordered such that at frame index 0, word index 0 has already occured. therefore we can take both as input to estimate the next word
         # word 0 can see frame 0 (because frame 0 occurs before the word does).
-        Xattn_mask=th.ones([LM_in_words.shape[1], LM_frames.shape[1]]) # create causal mask between language tokens and frames. every frame is paired with the previous word emitted, so that at the current frame we predic the next word from the current frame (and previous frames witha ttentions) and rpevious words. For more details look at agent.py words_to_agent()
-        for q in range(LM_in_words.shape[1]):
-            Xattn_mask[q, 0:q+1] = 0   # @ DOUBLE CHECK THIS IS MASKING THE RIGHT WAY #@r2 - !if using each_LM_token_attends_to_all_past_frames-style x-attn (as opposed to only frames that occured during langauge token), modify this mask appropriately.
-        fused = self.Xattn_VPT_LM(x=LM_frames, y=word_embeddings, attn_mask=Xattn_mask)
-        print('xattn1 out shape',fused.shape)
+        x2 = self.Xattn_VPT_LM(x=x2, y=word_embeddings, attn_mask=Xattn_mask)
+        print('xattn1 out shape',x2.shape)
 
         #### Feed LM fused input tokens & predict raw LM output
         #### From raw LM output, predict word classes (for language modelling loss)
         if LM_active_timestep:
             ### construct labels if possible
-            LM_labels = LM_in_words.roll(-1, dims=1)
+            LM_labels = ob_words['token_ids'][:,::LM_TIMEOUT].roll(-1, dims=1)
             if last_future_words:
                 LM_labels[:,-1] = last_future_words # if we have future words to make labels with use thsi, otherwise still use broken labels as labels, loss will obviously not be applicable but presumably we ommitted future_word knowing this and do not intend to use the loss, 
             ### get lm output for hidden stawets, classification head and loss
-            LM_loss, LM_words, LM_losses, hidden_outputs, LM_state_out = self.LM(inputs_embeds=word_embeddings, mems=LM_state_in, labels=LM_labels, return_dict=False, output_hidden_states=True) # causal attention mask is constructed internally. No need for padding despite batch_size>1 because all sequences are always full (always same number as input frames)
+            LM_loss, LM_words, LM_losses, hidden_outputs, LM_state = self.LM(inputs_embeds=word_embeddings, mems=LM_state, labels=LM_labels, return_dict=False, output_hidden_states=True) # causal attention mask is constructed internally. No need for padding despite batch_size>1 because all sequences are always full (always same number as input frames)
             # just get last hidden layer output
-            fused = hidden_outputs[-1]
-            # reshape LM_words 
-            LM_words = LM_words.reshape(batch_size, num_frames//LM_TIMEOUT, -1)
+            x2 = hidden_outputs[-1]
+            # reshape LM_words
+            LM_words = LM_words.view(batch_size, LM_seq_len, -1)
 
         else: # During inferemce when forward() is called per timestep, if LM is TIMEOUT'd at this tiemstep, output previous output from LM that VPT needs (does not include past words)
             LM_words = None # output during TIMEOUT is treated the same as with silent tokens during TIMEOUT, and discarded from LM input. dont need to predict it at all.
             #top layer|all abtches|last token|full embeddings
-            fused = LM_state_in[-1][:,-1,:] # during inference we can only use the LM every few timesteps. need to tell LM whether to compute at this timestep or just re-use the previous LM output re-use the lastest token from the last layer
-            LM_state_out = LM_state_in
+            x2 = LM_state[-1][:,-1,:] # during inference we can only use the LM every few timesteps. need to tell LM whether to compute at this timestep or just re-use the previous LM output re-use the lastest token from the last layer
             LM_loss = None
 
         #so that there is an LM output for every frame despite D LM timeout, repeat every LM outputs D times for each step in teh time dimensions. 
-        fused = th.repeat_interleave(fused, LM_TIMEOUT, dim=1)
-        fused = fused[:,:num_frames,:] #Make sure not to output too many values if the input frames is smaller than D
+        x2 = th.repeat_interleave(x2, LM_TIMEOUT, dim=1)[:,:seq_len,:]
+        x2 = x2 #Make sure not to output too many values if the input frames is smaller than D
         print('LM words shape',LM_words.shape)
 
 
         ### Gated cross attention: FUSE LM raw output & VPT-transformer-layer-1 output
         # fusing back with VPT-transformer-layer-1 output before going into VPT layer 2 (and using gated cross-attention) means that at the start of training, despit the added LM, the VPT model is identical to the unmodified version, and interaction between the two models can smoothly increase as it is learnt to be useful (as in Flamingo). allows stable training and avoid catastrophic forgetting.
         # so language is passed as queries and VPT tokens are passed at keys/values.
-        Xattn_mask=th.ones([num_frames, num_words]) # create causal mask between language tokens and frames. 
-        for q in range(num_frames):
-            Xattn_mask[q, 0:q+1] = 0   # @ DOUBLE CHECK THIS IS MASKING THE RIGHT WAY #@r2 - !if using each_LM_token_attends_to_all_past_frames-style x-attn (as opposed to only frames that occured during langauge token), modify this mask appropriately.
-        x = self.Xattn_LM_VPT(x=fused, y=x, attn_mask=Xattn_mask) #now that word/frame queries/keys have beens waped, we need to make a different attention mask to the first one
+        Xattn_mask = 1-Xattn_mask.transpose(0,1)# @ DOUBLE CHECK THIS IS MASKING THE RIGHT WAY #@r2 - !if using each_LM_token_attends_to_all_past_frames-style x-attn (as opposed to only frames that occured during langauge token), modify this mask appropriately.
+        x = self.Xattn_LM_VPT(x=x2, y=x, attn_mask=Xattn_mask) #now that word/frame queries/keys have beens waped, we need to make a different attention mask to the first one
         # ----------------------------------------- END INSERT LM
         print('fused output=',x.shape)
 
@@ -336,7 +336,7 @@ class MinecraftPolicy(nn.Module):
         print('single out=',self.single_output)
         print('x=',x.shape)
 
-        return (pi_latent, vf_latent), LM_words, VPT_state_out, LM_state_out, LM_loss
+        return (pi_latent, vf_latent), LM_words, VPT_state_out, LM_state, LM_loss
             
 
     def initial_state(self, batchsize):
@@ -432,9 +432,7 @@ class MinecraftAgentPolicy(nn.Module):
         self.pi_head.reset_parameters()
         self.value_head.reset_parameters()
 
-    def forward(self, ob_words, ob_frames, first: th.Tensor, VPT_state_in,
-                                                                            LM_state_in=None,
-                                                                            LM_active_timestep=True):
+    def forward(self, ob_words, ob_frames, first: th.Tensor, VPT_state_in, LM_state=None, LM_active_timestep=True):
         # extract mask from ob_frames
         if isinstance(ob_frames, dict):
             # We don't want to mutate the obs input.
@@ -445,17 +443,17 @@ class MinecraftAgentPolicy(nn.Module):
             mask = ob_frames.pop("mask", None)
         else:
             mask = None
-        (pi_h, v_h), pd_word, VPT_state_out, LM_state_out, LM_loss = self.net(
+        (pi_h, v_h), pd_word, VPT_state_out, LM_state, LM_loss = self.net(
                                                             ob_words=ob_words, 
                                                             ob_frames=ob_frames, 
                                                             VPT_state_in=VPT_state_in, 
                                                             context={"first": first},
-                                                            LM_state_in=LM_state_in,
+                                                            LM_state=LM_state,
                                                             LM_active_timestep=LM_active_timestep)
         pi_logits = self.pi_head(pi_h, mask=mask)
         vpred = self.value_head(v_h)
 
-        return (pi_logits, vpred), pd_word, VPT_state_out, LM_state_out, LM_loss
+        return (pi_logits, vpred), pd_word, VPT_state_out, LM_state, LM_loss
 
     def get_logprob_of_action(self, pd, action):
         """
@@ -474,7 +472,7 @@ class MinecraftAgentPolicy(nn.Module):
         return self.pi_head.kl_divergence(pd1, pd2)
 
 
-    def get_output_for_observation(self, ob_words, ob_img, VPT_state_in, first, LM_active_timestep=True):
+    def get_output_for_observation(self, ob_words, ob_img, VPT_state_in, first, LM_state=None, LM_active_timestep=True):
         """
         Return gradient-enabled outputs for given observation.
 
@@ -493,13 +491,14 @@ class MinecraftAgentPolicy(nn.Module):
                                                                                                 ob_words=ob_words, 
                                                                                                 first=first, 
                                                                                                 VPT_state_in=VPT_state_in,
+                                                                                                LM_state = LM_state,
                                                                                                 LM_active_timestep=LM_active_timestep)
 
         return pd_action, self.value_head.denormalize(vpred_action), LM_words, VPT_state_out, LM_state_out, LM_loss
 
 
 
-    def get_output_for_observations(self, ob_words, ob_frames, VPT_state_in=None, LM_state_in=None, dummy_first=None, LM_active_timestep=True):
+    def get_output_for_observations(self, ob_words, ob_frames, VPT_state_in=None, LM_state=None, dummy_first=None, LM_active_timestep=True):
         """
         Return gradient-enabled outputs for a sequence of frames.
 
@@ -527,7 +526,7 @@ class MinecraftAgentPolicy(nn.Module):
             ob_frames=ob_frames,
             first=dummy_first,
             VPT_state_in=VPT_state_in,
-            LM_state_in=LM_state_in,
+            LM_state=LM_state,
             LM_active_timestep=LM_active_timestep
         )
 
@@ -545,9 +544,9 @@ class MinecraftAgentPolicy(nn.Module):
     # you must pass in starter words as [2, 124, 1256, 77855, 7258]
     ## @@@@ EDIT TO CONFORM TO LM_TIMEOUT A.K.A 'D'
     @th.no_grad()
-    def act(self, obs_frame, first, VPT_state_in, LM_state_in, word_context, current_timestep, stochastic: bool=True, taken_action=None, return_pd=False):
-        # we can feed LM_state_in as none if no prevous state exists.
-        LM_TIMEOUT=4
+    def act(self, obs_frame, first, VPT_state_in, LM_state, word_context, current_timestep, stochastic: bool=True, taken_action=None, return_pd=False):
+        # we can feed LM_state as none if no prevous state exists.
+        LM_TIMEOUT=1
         BOS=2
 
         first = first.unsqueeze(1)
@@ -556,12 +555,12 @@ class MinecraftAgentPolicy(nn.Module):
         current_word = tree_map(lambda x: x.unsqueeze(1), word_context[-1])
         
         # from words and frames, get next action
-        (pd_action, vpred_action, _), pd_word, VPT_state_out, LM_state_out, LM_loss = self(
+        (pd_action, vpred_action, _), pd_word, VPT_state_out, LM_state, LM_loss = self(
                                                                     first=first, 
                                                                     obs_frames=current_frame,
                                                                     obs_words=current_word,  # pass most recent word to pair with current frame. this works even with D: LM outputs something at timestep 0 and attends to it at timestep D and later
                                                                     VPT_state_in=VPT_state_in,
-                                                                    LM_state_in=LM_state_in,
+                                                                    LM_state=LM_state,
                                                                     LM_active=current_timestep%LM_TIMEOUT==0
                                                                     )
 
@@ -591,7 +590,7 @@ class MinecraftAgentPolicy(nn.Module):
         ac = tree_map(lambda x: x[:, 0], ac)
 
         current_timestep += 1
-        return ac, VPT_state_out, result, LM_state_out, word_context, current_timestep    # add newly predicted word to contexxtm which should be fed back into the agent.
+        return ac, VPT_state_out, result, LM_state, word_context, current_timestep    # add newly predicted word to contexxtm which should be fed back into the agent.
 
 
     # not used in VLPT - no Rl

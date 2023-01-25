@@ -176,8 +176,7 @@ class MineRLAgent:
         # therefore, every frame is paired with the word before (every word is paired with the )
 
 
-        LM_TIMEOUT = 2
-        FRAMERATE = 20
+        LM_TIMEOUT = 1
         SILENCE_TOKEN_ID = 2 # 2 in transfo_xl is ','. performs second best to ' ', but transfo_xl has no ' ' token since it is word-level tokenizer. #1437 in OPT is space token. best performing in OPT accoding to rough experiments on gutenber performance with different random tokns inserted at the same positions. # IF TRANSCRIBER GIVE NO COMMA, USE COMMA. comma=6. newline character=50118. single space=1437 luckily, in this tokenizer, stray spaces are classified as separate characters isntead of extensions of real word parts, so it is an intuitive 1:1 translation of extra spaces from human langauge to model. Hopefully it is therefore much easier to learn! # TEST: INSERT TOKENS AS NOISE TO NORMAL LANGUAGE INPUT AND SEE WHICH IS LEAST DESTRUCTIVE TO PERFORMANCE
         num_frames = ob_frames['img'].shape[1]
 

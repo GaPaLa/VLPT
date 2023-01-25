@@ -19,25 +19,21 @@
 
 
 
-
 # TODO: 
 """
 
 --- FIX
 - Figure out how VPT, LM put sequences across multiple batches: how data physically laid, out, how hidden state reset.
-- Figure out good max_len to use
-- Figure out when to backprop
-- Fix gradient accumulation
-- First vs mem_reset()
 - Do: audio -> tokens + tokens ms -> save to file
 - Edit DataLoader: load transcipt.file
-- add val_loss iteration every 100 batches: VLPT_val_loss, LM_val_loss, LM_wt103_loss
+- add val_loss iteration every 100 batches: VLPT_val_loss, LM_val_loss, LM_wt103_loss NOTE: scraping web, will probably get some same videos as VPT paper, may result in overfitting. we are using RL finetuned model o hopefully that made it forget but just be careful. Might need dropout but try first without. also remove dropout form LM, wont train for many epochs, can get a LOT of data
 - save model every 10000 batches: for MineRL assessment through time.
 - Data Loader: (if doesnt fit in batch,m just discard batch, end episode early) (send episode_ended signal to clear hidden state when done. How to clear hidden state? how hidden staet batch???)
-
+- IGNORE: just set D=1 and progress and dont worry about batch and grad accum rates and tgt_len differences compensation in batch handling arghh
 
 --- OPTIMIZE
 - put VPT and LM on different GPU
+- DataParrallel and OGtransfoxlDataParallel
 - test:
     IDM prediction on labelled dataset -> store
     VPT prediction on labelled dataset
@@ -50,8 +46,8 @@
     IDM prediction on labelled dataset (YT480p) -> store
     VPT prediction on labelled dataset (YT2480p)
     VPT prediction on stored (YT480p) IDM labels
+- IMPLEMENT D/LM_TIMEOUT
 - currently, TransformerXL's softmx classification layer only either support gettings the loss or predicting wor dprobabilities, not both. This means that it must be passed through twice in ordre to get both, which is slow. TO optimize, finda  way to sample AdaptiveLogSoftmax while getting loss.
-
 
 - check PaLI/Flamingo paper for training procedure: KL, losses...
 
@@ -62,6 +58,7 @@
 - create script to take audio from video, check if WPM is good (180 - 240), then save audio somewhere safe if good, along with video link to a file.
 
 --- VIDEO
+- FOR DENSE LANGUAEG USE 'TUTORIAL' KEYWORD
 - manually label 8000 frames spam/ham
 - train SVM+frozen CLIP as spamham
 - create script to select a video, select a few seconds randomly, download whole video if 80% gathered frames are clean
@@ -70,13 +67,45 @@
 - Finetune pure VPT on collected video dataset using VLPT codebase with langauge model set as not active.
 - on collected video audio data with NULLS filtered out, check how often silence tokens appear (some balance between peak and average) and set D appropriately
 - Finetune Transfo_XL on collected words dataset
+
+
+--- EVALUATION
+check different way of looking at learn representations: attention in LM over time/space? attention in VPT to VPT1/ LM?
 """
 
 
 
 
+#NOTE:
+"""
+------ HYPERPARAMS:
+
+###DATASET
+episode length = first 0 mins| based on: openAI used first  mins for 'early game' finetuning, longer for others. Not long anough for long term langauge stuff.
+
+### XLRECURRENCE
+LM_tgt_len = 256 |227 | based on: in order for LM to see past 10 minutes (assuming 50ms per frame, mem_len = tgt_len(?), ). 10 minutes good, needs  to see algnauge, neeed to keep LM intact: it was trained on mem = 384 tgt=384, so we need to get as close as possible. 256 is close, although we still get silence tokens I dont think results should be clear at these numbers and I think higher is probably too expensive. transfoxl was trained even with tgt=128 wiht useful results
+LM_mem_len = 256 | 227 | based one: TransformerXL paper uses same memlen as tgtlen during training, so using same as tgt^ here (assuming it is for equal learning progress on both mechanisms). During eval can be made much longer. (Maybe test same with VPT?). 
+VPT_tgt_len = 128 | based on: original VPT paper, minimise differences, minimise compute
+VPT_mem_len = 128 | based on: Given `prev` keys from cache, and `new` keys,
+            returns (cache, full), where
+            - cache goes into the output state, length chosen so that on the
+                next timestep, there are enough cached timesteps to get the full
+                context of lenth self.maxlen.
 
 
+# JOINT MODEL:
+
+
+
+### LEARNING PARAMS:
+learning rate:   | based on: PaLI lr = 
+learning rate warmup: 5000 | based on: cant remember
+learning rate cooldown: cosine until last step
+num steps = 
+how long to train: how long can I run A100? $10 = 100 creds = 7.5 compute hours. how long does a single batch take? idk slowest possible = 
+
+"""
 
 
 
@@ -94,8 +123,6 @@ from agent import PI_HEAD_KWARGS, MineRLAgent
 from data_loader import DataLoader
 from lib.tree_util import tree_map
 
-from lib.proj_adaptive_softmax import ProjectedAdaptiveLogSoftmax
-
 if th.cuda.is_available():
     device = th.device('cuda')
     print("USING CUDA")
@@ -103,24 +130,53 @@ else:
     device = th.device('cpu')
     print("USING CPU")
 
+from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
+
+
+
+""" both VPT and LM are TransformerXL. Remeber that the incoming data must reflect this - each batch has smaples o videos 0-b in an order. each sequcen is in order and ahs an index. 
+After each batch they both save a fraction of their internal outputs from that batch and bring it to the next so they can bring past memories to the continuation of teh sequences in the repvious batch.
+This means that every batch must consist of teh same videos in the previous batch (but the next frames in time obviously) and they must be in the same order within that batch
+
+ batch 1       batch 2     and so on
+a,b,c,d,e    f,g,h,i,j
+q,r,s,t,u    v,w,x,y,z      ...
+g,h,i,j,k    l,m,n,o,p
+
+How long the input sequnces are and how far back tokens the recurrent mechanism can reach back in determine what fraction of tokens are processed by either method
+we wwant them even, so inptus equnce length = mem size
+
+Since we have many videos, we need to organise the taining such that at a point the memories are reset and we change which videos are being inputted across batches.
+We need to make sure hidden states are managed so that everything is coherent - we dont wat to give the memories of one episode to the agent when is working ona  different episode.
+This work also avoids passing one at the beginning of training to next ones since this trains the agent to continue using its original old hiddenr representations,
+so video sequences are kept continuous and all made to end when the videos are over (they are all trimmed to the same length), at which point all memories for VPT and LM are reset.
+"""
 
 
 
 EPOCHS = 20
 # Needs to be <= number of videos
 BATCH_SIZE = 8
+SEQ_LEN = 256  # WE WANT 10 MINS: WE WANT 10 minutes of langauge that LM can look back on:  ( seq_len*18*D*50 ) / (1000*60)      @seq_len=256, D=1 this is about 4 mins
 # Ideally more than batch size to create
 # variation in datasets (otherwise, you will
-# get a bunch of consecutive samples)
+# get a bunch of consecutive samples)       # -------- ah, just what I'm looking for!
 # Decrease this (and batch_size) if you run out of memory
-N_WORKERS = 12
+N_WORKERS = 8
 DEVICE = "cuda"
-
 LOSS_REPORT_RATE = 100
 
-LEARNING_RATE = 0.000181
+VPT_FINETUNE_LEARNING_RATE = 0.000181
 WEIGHT_DECAY = 0.039428
 MAX_GRAD_NORM = 5.0
+
+num_videos = 6000
+max_train_steps = num_videos/int(600000/SEQ_LEN)    # 10 mins per video = 600000 ms -> 4687 chunks of 128 frames. want 1000 hours video = 60,000 minutes = 6,000 videos of 10 minutes each
+peak_learning_rate = 0.0002
+warmup_steps = max_train_steps(0.08)
+
+
+
 
 def load_model_parameters(path_to_model_file):
     agent_parameters = pickle.load(open(path_to_model_file, "rb"))
@@ -131,140 +187,108 @@ def load_model_parameters(path_to_model_file):
 
 def behavioural_cloning_train(data_dir, in_model, in_weights, out_weights):
 
-
-
     ### VPT INIT
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     # To create model with the right environment.
     # All basalt environments have the same settings, so any of them works here
     env = gym.make("MineRLBasaltFindCave-v0")
-    agent = MineRLAgent(env, device=DEVICE, policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs)
+    agent = MineRLAgent(env, device=DEVICE, policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs).to(DEVICE)
     agent.load_weights(in_weights)
     env.close()
-    policy = agent.policy
-    trainable_parameters = policy.parameters()
-    # Parameters taken from the OpenAI VPT paper
-    optimizer = th.optim.Adam(
-        trainable_parameters,
-        lr=LEARNING_RATE,
-        weight_decay=WEIGHT_DECAY
-    )
-
+    trainable_parameters = agent.policy.parameters()
+    #initiliase VPT memories to empty
+    VPT_state = None
 
     ### LM INIT
-    # ALTER PYTHON FILES WITH UPTADTED EFFICIENT TRANSFORMER XL SOFTMAX FUNCTION
+    # initialise LM memories to empty
+    LM_state = None
     
+    # define optimizer
+    optimizer = th.optim.Adam(
+                    trainable_parameters,
+                    lr=peak_learning_rate,
+                    weight_decay=WEIGHT_DECAY)
+
+    lr_schedule = CosineAnnealingWarmupRestarts(optimizer,
+                    first_cycle_steps=max_train_steps,
+                    cycle_mult=1.0,
+                    max_lr=peak_learning_rate,
+                    min_lr=0.0,
+                    warmup_steps=1000,
+                    gamma=1.0)
+
 
     ## Data Loader init
     data_loader = DataLoader(
         dataset_dir=data_dir,
         n_workers=N_WORKERS,
         batch_size=BATCH_SIZE,
-        n_epochs=EPOCHS
-    )
+        seq_len = SEQ_LEN,
+        n_epochs=EPOCHS)
 
+
+    # start training loop
     start_time = time.time()
+    is_first_frame = th.zeros((BATCH_SIZE, SEQ_LEN), dtype=th.bool).to(DEVICE)
+    current_video_group_id = 0
+    # get multiple steams of 10 minutes* video across multiple batches. continue until (to ensure lanauge model sees far back langauge)
+    for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(data_loader):
 
-    # Keep track of the hidden state per episode/trajectory.
-    # DataLoader provides unique id for each episode, which will
-    # be different even for the same trajectory when it is loaded
-    # up again
-    episode_hidden_states = {}
-    dummy_first = th.from_numpy(np.array((False,))).to(DEVICE)
-
-
-
-
-
+        # multiple batches from the same video group will occur in a row. Dont reset memory until a different video group comes along.
+        if current_video_group_id != video_group_id:
+            is_first_frame[:,...] = True
+            agent.policy.LM.reset_mem()
+            current_video_group_id = video_group_id
 
 
+        ### ------------- format input from data loader to agent        
+        # format input frames
+        x_frames = agent._video_obs_to_agent(batch_frames['img'])
+        # format input/label words
+        x_words, last_future_words = agent._words_to_agent(batch_words['token_ids'], batch_words['ms'])
+        #format action labels
+        #actions_formatted = th.zeros([BATCH_SIZE, SEQ_LEN])        # NULL ACTIONS NOT REMOVED: this is probably fine because we still get rid of al lot of null actions (any that happend with no paired word. thjis is done to maintain language integrity and timings). We can mask NULL actions now though. Probably should to maintain comparability to VPT, but this will proabbly hurt performance - VPT suggests getting rid of most but not all NULL actionsm which this probably does. IDK
+        action_labels = agent._env_action_to_agent(batch_actions, to_torch=True, check_if_null=False) 
+        #actions_formatted[b,t] = action
 
 
+        ### ----------- feed batch of input sequences (frames and paired language tokens) to agent and get output action and 
+        pi_distribution, _, VPT_state, LM_state, LM_loss = agent.policy.get_output_for_observation(
+                                                                    ob_words=x_words,
+                                                                    ob_frames=x_frames,
+                                                                    VPT_state_in=VPT_state,
+                                                                    context=is_first_frame,
+                                                                    LM_state=LM_state,
+                                                                    LM_active_timestep=True,
+                                                                    last_future_words=None,
+                                                                    last_future_words=last_future_words)
 
-    loss_sum = 0
-    for batch_i, (batch_frames, batch_words, batch_actions, batch_episode_id) in enumerate(data_loader):
-        batch_size = batch_frames['img'].shape[0]
-        sequence_length = batch_frames['img'].shape[1]
-
-        actions_formatted = th.zeros([batch_size, sequence_length])
-        for b in range(batch_size):
-            for t in range():
-                # NULL ACTIONS NOT REMOVED: this is probably fine because we still get rid of al lot of null actions (any that happend with no paired word. thjis is done to maintain language integrity and timings). We can mask NULL actions now though. Probably should to maintain comparability to VPT, but this will proabbly hurt performance - VPT suggests getting rid of most but not all NULL actionsm which this probably does. IDK
-                action = agent._env_action_to_agent(batch_actions, to_torch=True, check_if_null=False) 
-                actions_formatted[b,t] = action
-
-        frames_formatted = th.zeros(len(batch_frames['img']), 128,128,3)
-        frames_formatted = agent._video_obs_to_agent(batch_frames['img'])
-        
-        words_formatted = agent._words_to_agent(batch_words['ob_words'], batch_words['ms'])
-        
-
-        if episode_id_combo not in episode_hidden_states:
-            # TODO need to clean up this hidden state after worker is done with the work item.
-            #      Leaks memory, but not tooooo much at these scales (will be a problem later).
-            episode_hidden_states[episode_id] = policy.initial_state(1)
-        agent_state = episode_hidden_states[episode_id]
-
-        pi_distribution, v_prediction, VPT_state, LM_state, LM_loss = policy.get_output_for_observation(
-            frames_formatted,
-            words_formatted,
-            agent_state,
-            dummy_first
-        )
-
-        VPT_loss  = -policy.get_logprob_of_action(pi_distribution, actions_formatted)
-
-        pred_hid = LM_output.hidden_states[:-tgt_len:]
-        LM_labels = ### construct labels              https://github.com/huggingface/transformers/blob/main/src/transformers/models/transfo_xl/modeling_transfo_xl.py bringing code from inside the model outside  to customise its utility. internally, num albels = num input tokens and so the loss is not calculated for each output: inefficient. so the loss calculation is rbought out from within the model and optimised 
-        LM_labels = LM_in_words.roll(-1, dims=1)
-        if last_future_words:
-        LM_labels[:,-1] = last_future_words # if we have future words to make labels with use thsi, otherwise still use broken labels as labels, loss will obviously not be applicable but presumably we ommitted future_word knowing this and do not intend to use the loss, 
-        softmax_output = self.crit(pred_hid, labels)
-        prediction_scores = softmax_output.view(bsz, tgt_len, -1) if labels is None else ()
-
-        if labels is not None:
-            losses = softmax_output.view(bsz, tgt_len - 1)
-            # Avoids from incorporating padding (-100) tokens into loss value
-            loss = losses[losses != 0].mean()
-        else:
-            losses, loss = None, None
-
-        LM_loss = policy.net.LM.crit(pred_hid, labels)
-
-
-
-        # Make sure we do not try to backprop through sequence in future iterations
-        # (fails with current accumulation).
-        # @ implementing backprop through sequence/time. 
-        # Batch accumulation method removed for standard batching
+        # (fails with current accumulation). # Make sure we do not try to backprop through sequence in future iterations
         VPT_state = tree_map(lambda x: x.detach(), VPT_state)
-        episode_hidden_states[episode_id] = VPT_state
-        
+        VPT_loss  = -agent.policy.get_logprob_of_action(pi_distribution, action_labels)
 
-        # Finally, update the agent to increase the probability of the
-        # taken action.
-        # Remember to take mean over batch losses
-        # In old VPT, if input action was NULL, remove from training data. However, this disrupts the word/frame timing for the LM,
-        # so we need to let the model predict from these actions but not train it to predict them.
-        # the VPT paper also said that removing triplets of actions is best for performance but they didnt do this because they only realised later.
-        # In order to make results more comparable to VPT, I do not do this.
-        batch_loss = (-log_prob / BATCH_SIZE)
-        batch_loss.backward()
-
+        # ------------ optimize model
+        BLC_loss = VPT_loss + LM_loss
+        BLC_loss.backward()
         th.nn.utils.clip_grad_norm_(trainable_parameters, MAX_GRAD_NORM)
         optimizer.step()
         optimizer.zero_grad()
+        lr_schedule.step()
 
-        loss_sum += batch_loss
+        loss_sum += VPT_loss
         if batch_i % LOSS_REPORT_RATE == 0:
             time_since_start = time.time() - start_time
             print(f"Time: {time_since_start:.2f}, Batches: {batch_i}, Avrg loss: {loss_sum / LOSS_REPORT_RATE:.4f}")
             loss_sum = 0
         
-        # delete the hidden states for finished episodes
+    state_dict = agent.policy.state_dict()
+    th.save(state_dict, out_weights)
 
-state_dict = policy.state_dict()
-th.save(state_dict, out_weights)
+
+
+
+
+
 
 
 if __name__ == "__main__":

@@ -28,3 +28,6 @@ and this paper for Dynamic-Time-Warping
   doi={10.18637/jss.v031.i07}
 }
 
+
+
+cosine learnign rate decay and warmup https://github.com/katsura-jp/pytorch-cosine-annealing-with-warmup
