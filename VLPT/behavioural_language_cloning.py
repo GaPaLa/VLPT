@@ -23,7 +23,6 @@
 """
 
 --- FIX
-- Figure out how VPT, LM put sequences across multiple batches: how data physically laid, out, how hidden state reset.
 - Do: audio -> tokens + tokens ms -> save to file
 - Edit DataLoader: load transcipt.file
 - add val_loss iteration every 100 batches: VLPT_val_loss, LM_val_loss, LM_wt103_loss NOTE: scraping web, will probably get some same videos as VPT paper, may result in overfitting. we are using RL finetuned model o hopefully that made it forget but just be careful. Might need dropout but try first without. also remove dropout form LM, wont train for many epochs, can get a LOT of data
@@ -134,8 +133,8 @@ from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
 
 
 
-""" both VPT and LM are TransformerXL. Remeber that the incoming data must reflect this - each batch has smaples o videos 0-b in an order. each sequcen is in order and ahs an index. 
-After each batch they both save a fraction of their internal outputs from that batch and bring it to the next so they can bring past memories to the continuation of teh sequences in the repvious batch.
+""" both VPT and LM are TransformerXL. Remember that the incoming data must reflect this - each batch has samples of videos in an order. each sequcen is in order (obviously, in terms of how frames  ioni teh sequnce are ordered) and has an ID. 
+After each batch they both save a fraction of their internal outputs from that batch and bring it to the next batch so they can bring past memories to the continuation of teh sequences in the repvious batch.
 This means that every batch must consist of teh same videos in the previous batch (but the next frames in time obviously) and they must be in the same order within that batch
 
  batch 1       batch 2     and so on
@@ -143,7 +142,7 @@ a,b,c,d,e    f,g,h,i,j
 q,r,s,t,u    v,w,x,y,z      ...
 g,h,i,j,k    l,m,n,o,p
 
-How long the input sequnces are and how far back tokens the recurrent mechanism can reach back in determine what fraction of tokens are processed by either method
+How long the input sequnces are and how far back tokens the recurrent mechanism can reach back determine what fraction of tokens are processed by either method
 we wwant them even, so inptus equnce length = mem size
 
 Since we have many videos, we need to organise the taining such that at a point the memories are reset and we change which videos are being inputted across batches.
@@ -154,21 +153,32 @@ so video sequences are kept continuous and all made to end when the videos are o
 
 
 
+
+
+
+
+
+
+DATASET = '../Data Gathering/DATASET'
 EPOCHS = 20
 # Needs to be <= number of videos
 BATCH_SIZE = 8
-SEQ_LEN = 256  # WE WANT 10 MINS: WE WANT 10 minutes of langauge that LM can look back on:  ( seq_len*18*D*50 ) / (1000*60)      @seq_len=256, D=1 this is about 4 mins
 # Ideally more than batch size to create
 # variation in datasets (otherwise, you will
 # get a bunch of consecutive samples)       # -------- ah, just what I'm looking for!
 # Decrease this (and batch_size) if you run out of memory
 N_WORKERS = 8
+SEQ_LEN = 512  # WE WANT 10 minutes of langauge that LM can look back on:  ( seq_len*18*D*50 ) / (1000*60)      @seq_len=256, D=1 this is about 4 mins. Sequence length needs to be chosen so that when VPT predict this many frames it proved LM with tgt_len inputs to predict with. adjusting this threfore adjsuts tgt_len and how far back in time LM can see during training.
 DEVICE = "cuda"
 LOSS_REPORT_RATE = 100
+EVALUATION_RATE = 1000
 
 VPT_FINETUNE_LEARNING_RATE = 0.000181
 WEIGHT_DECAY = 0.039428
 MAX_GRAD_NORM = 5.0
+
+VPT_WEIGHTS_FILE = 
+VPT_MODEL_FILE = 
 
 num_videos = 6000
 max_train_steps = num_videos/int(600000/SEQ_LEN)    # 10 mins per video = 600000 ms -> 4687 chunks of 128 frames. want 1000 hours video = 60,000 minutes = 6,000 videos of 10 minutes each
@@ -185,52 +195,61 @@ def load_model_parameters(path_to_model_file):
     pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
     return policy_kwargs, pi_head_kwargs
 
-def behavioural_cloning_train(data_dir, in_model, in_weights, out_weights):
-
-    ### VPT INIT
-    agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
-    # To create model with the right environment.
-    # All basalt environments have the same settings, so any of them works here
-    env = gym.make("MineRLBasaltFindCave-v0")
-    agent = MineRLAgent(env, device=DEVICE, policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs).to(DEVICE)
-    agent.load_weights(in_weights)
-    env.close()
-    trainable_parameters = agent.policy.parameters()
-    #initiliase VPT memories to empty
-    VPT_state = None
-
-    ### LM INIT
-    # initialise LM memories to empty
-    LM_state = None
-    
-    # define optimizer
-    optimizer = th.optim.Adam(
-                    trainable_parameters,
-                    lr=peak_learning_rate,
-                    weight_decay=WEIGHT_DECAY)
-
-    lr_schedule = CosineAnnealingWarmupRestarts(optimizer,
-                    first_cycle_steps=max_train_steps,
-                    cycle_mult=1.0,
-                    max_lr=peak_learning_rate,
-                    min_lr=0.0,
-                    warmup_steps=1000,
-                    gamma=1.0)
 
 
-    ## Data Loader init
-    data_loader = DataLoader(
-        dataset_dir=data_dir,
-        n_workers=N_WORKERS,
-        batch_size=BATCH_SIZE,
-        seq_len = SEQ_LEN,
-        n_epochs=EPOCHS)
+### ---------------------- initialise BLC agent
+### VPT INIT
+agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(VPT_MODEL_FILE)
+# To create model with the right environment.
+# All basalt environments have the same settings, so any of them works here
+env = gym.make("MineRLBasaltFindCave-v0")
+agent = MineRLAgent(env, device=DEVICE, policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs).to(DEVICE)
+agent.load_weights(VPT_WEIGHTS_FILE)
+env.close()
+trainable_parameters = agent.policy.parameters()
+#initiliase VPT memories to empty
+VPT_state = None
+
+### LM INIT
+# initialise LM memories to empty
+LM_state = None
+
+# define optimizer
+optimizer = th.optim.AdamW(
+                trainable_parameters,
+                lr=peak_learning_rate,
+                weight_decay=WEIGHT_DECAY)
+
+lr_schedule = CosineAnnealingWarmupRestarts(optimizer,
+                first_cycle_steps=max_train_steps,
+                cycle_mult=1.0,
+                max_lr=peak_learning_rate,
+                min_lr=0.0,
+                warmup_steps=1000,
+                gamma=1.0)
 
 
-    # start training loop
-    start_time = time.time()
-    is_first_frame = th.zeros((BATCH_SIZE, SEQ_LEN), dtype=th.bool).to(DEVICE)
-    current_video_group_id = 0
+
+
+### ---------------------------- initialise dataset and training
+## Data Loader init
+data_loader = DataLoader(
+    dataset_dir=DATASET+'/train',
+    n_workers=N_WORKERS,
+    batch_size=BATCH_SIZE,
+    seq_len = SEQ_LEN,
+    n_epochs=EPOCHS)
+
+
+# start training loop
+start_time = time.time()
+is_first_frame = th.zeros((BATCH_SIZE, SEQ_LEN), dtype=th.bool).to(DEVICE)
+current_video_group_id = 0
+current_batch = 0
+
+def BLC_train(data_dir, in_model, in_weights, out_weights):
+    global agent, current_video_group_id, current_batch, 
+
     # get multiple steams of 10 minutes* video across multiple batches. continue until (to ensure lanauge model sees far back langauge)
     for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(data_loader):
 
@@ -280,11 +299,41 @@ def behavioural_cloning_train(data_dir, in_model, in_weights, out_weights):
             time_since_start = time.time() - start_time
             print(f"Time: {time_since_start:.2f}, Batches: {batch_i}, Avrg loss: {loss_sum / LOSS_REPORT_RATE:.4f}")
             loss_sum = 0
+        if batch_i % EVALUATION_RATE == 0:
+            eval_loss = BLC_evaluate()
         
-    state_dict = agent.policy.state_dict()
-    th.save(state_dict, out_weights)
+            
+        state_dict = agent.policy.state_dict()
+        th.save(state_dict, out_weights)
 
 
+def BLC_evaluate(agent):
+
+
+    # load examples 128*40 frames
+    # load example actions
+    # load example actions
+    ## Data Loader init
+    data_loader = DataLoader(
+        dataset_dir=DATASET+'/valid',
+        n_workers=1,
+        batch_size=2,
+        seq_len=SEQ_LEN,
+        n_epochs=EPOCHS)
+
+    for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(data_loader):
+        video_group_id
+        ### ------------- format input from data loader to agent        
+        # format input frames
+        x_frames = agent._video_obs_to_agent(batch_frames['img'])
+        # format input/label words
+        x_words, last_future_words = agent._words_to_agent(batch_words['token_ids'], batch_words['ms'])
+        #format action labels
+        #actions_formatted = th.zeros([BATCH_SIZE, SEQ_LEN])        # NULL ACTIONS NOT REMOVED: this is probably fine because we still get rid of al lot of null actions (any that happend with no paired word. thjis is done to maintain language integrity and timings). We can mask NULL actions now though. Probably should to maintain comparability to VPT, but this will proabbly hurt performance - VPT suggests getting rid of most but not all NULL actionsm which this probably does. IDK
+        action_labels = agent._env_action_to_agent(batch_actions, to_torch=True, check_if_null=False) 
+        #actions_formatted[b,t] = action
+
+    # agent estimate 10 video sequence batches of 512 with same tgt_len and mem_len
 
 
 

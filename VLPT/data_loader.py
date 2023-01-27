@@ -18,7 +18,15 @@ QUEUE_TIMEOUT = 10
 
 CURSOR_FILE = os.path.join(os.path.dirname(__file__), "cursors", "mouse_cursor_white_16x16.png")
 
+
+
+
+
 MINEREC_ORIGINAL_HEIGHT_PX = 720
+
+
+
+
 
 # If GUI is open, mouse dx/dy need also be adjusted with these scalers.
 # If data version is not present, assume it is 1.
@@ -59,7 +67,7 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
         task = tasks_queue.get()
         if task is None:
             break
-        trajectory_id, video_path, json_path = task
+        trajectory_id, video_path, transcription_path, json_path = task
         video = cv2.VideoCapture(video_path)
         # NOTE: In some recordings, the game seems to start
         #       with attack always down from the beginning, which
@@ -80,7 +88,7 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
         
         token_ids = []
         word_ms = []
-        with open(transcribed_path) as words_data:
+        with open(transcription_path) as words_data:
             while words_data.hasnext():
                 line = words_data.readline()
                 line = line.split(',')
@@ -92,7 +100,7 @@ def data_loader_worker(tasks_queue, output_queue, quit_workers_event):
                      
 
 
-        frame_ms = -50
+        frame_ms = 0
         all_frames = []
         all_actions = []
         for i in range(len(json_data)):  # FOR EVERY ACTION, CREATE [previous frame sequence: 128] [previous word sequence: 2048] [previous action sequence: 128]
