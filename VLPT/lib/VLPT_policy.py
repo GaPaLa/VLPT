@@ -243,7 +243,7 @@ class MinecraftPolicy(nn.Module):
 
     # --------------       ---------------         -------------       -----------       KEY ARCHITECTURE DEFINITION
     ## NOTE OF HOW FORWARD WORKS AT END OF THIS CLASS:
-    def forward(self, ob_words, ob_frames, VPT_state, context, LM_state=None, LM_active_timestep=True, last_future_words=None):
+    def forward(self, ob_words, ob_frames, VPT_state, context, LM_state=None, LM_active_timestep=True, LM_labels=None):
         print('entered BLC forward')
         LM_state=None
         assert not(LM_state==None and LM_active_timestep==False), "LM is inactive this timestep but no past LM outputs are available to feed in its place"
@@ -294,12 +294,14 @@ class MinecraftPolicy(nn.Module):
         #### Feed LM fused input tokens & predict raw LM output
         #### From raw LM output, predict word classes (for language modelling loss)
         if LM_active_timestep:
+
             ### construct labels if possible
-            LM_labels = ob_words['token_ids'][:,::LM_TIMEOUT].roll(-1, dims=1)
-            if last_future_words:
-                LM_labels[:,-1] = last_future_words # if we have future words to make labels with use thsi, otherwise still use broken labels as labels, loss will obviously not be applicable but presumably we ommitted future_word knowing this and do not intend to use the loss, 
-            ### get lm output for hidden stawets, classification head and loss
+            if LM_labels:
+                LM_labels = LM_labels[:,::LM_TIMEOUT] # since input words are dropped according to D, labels are dropped according to D, too
+
+            ### get LM raw output, word predictions and loss
             LM_loss, LM_words, LM_losses, hidden_outputs, LM_state = self.LM(inputs_embeds=x2, mems=LM_state, labels=LM_labels, return_dict=False, output_hidden_states=True) # causal attention mask is constructed internally. No need for padding despite batch_size>1 because all sequences are always full (always same number as input frames)
+
             # just get last hidden layer output
             x2 = hidden_outputs[-1]
             # reshape LM_words
@@ -311,9 +313,9 @@ class MinecraftPolicy(nn.Module):
             x2 = LM_state[-1][:,-1,:] # during inference we can only use the LM every few timesteps. need to tell LM whether to compute at this timestep or just re-use the previous LM output re-use the lastest token from the last layer
             LM_loss = None
 
-        #so that there is an LM output for every frame despite D LM timeout, repeat every LM outputs D times for each step in teh time dimensions. 
-        x2 = th.repeat_interleave(x2, LM_TIMEOUT, dim=1)[:,:seq_len,:]
-        x2 = x2 #Make sure not to output too many values if the input frames is smaller than D
+        #so that there is an LM output for every frame despite LM_timeout (A.K.A 'D'), repeat every LM outputs D times per step in the time dimension. 
+        #Make sure not to output too many values if the input frames is not divisible by D
+        x2 = th.repeat_interleave(x2, LM_TIMEOUT, dim=1)[:,:seq_len,:] 
         print('LM words shape',LM_words.shape)
 
 

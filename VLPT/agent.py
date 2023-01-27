@@ -105,8 +105,9 @@ def resize_image(img, target_resolution):
 
 
 class MineRLAgent:
-    def __init__(self, env, device=None, policy_kwargs=None, pi_head_kwargs=None):
-        validate_env(env)
+    def __init__(self, env=None, device=None, policy_kwargs=None, pi_head_kwargs=None):
+        if env:
+            validate_env(env)
 
         ## args
         if device is None:
@@ -201,12 +202,12 @@ class MineRLAgent:
         ### Format ob_words so that every frame has an associated word, using silence token insertion when there are no words for a frame.
         ### ob_words may have any sequence length, may be word tokens for entire sequence.
         ## save results as variable langauge_tokens
-        language_tokens = th.zeros([batch_size, num_frames//LM_TIMEOUT], dtype=th.long)
+        language_tokens = th.zeros([batch_size, (num_frames//LM_TIMEOUT)+1], dtype=th.long)    # need to get one more langauge token than frames at end so that we have a word to predict
         # NOTE: BOS must be in given tokens and it must occur ata  negative timestamp to indicate that the first frame is allowed to be apired wth that token and passed to LM as one input from past observations
         for b in batch_size:
             
             tokens_queue=[]
-            for t in num_frames//LM_TIMEOUT: #### D MUST BE DIVISIBLE BY NUMBER OF FRAMES
+            for t in language_tokens.shape[1]: #### D MUST BE DIVISIBLE BY NUMBER OF FRAMES
                 
                 #check for langauge tokens that occur during the 50ms span of each frame
                 word_index = th.where(  (ob_words['ms'][b] >= ob_frames['ms'][b,t*LM_TIMEOUT] - 50*LM_TIMEOUT)
@@ -223,9 +224,15 @@ class MineRLAgent:
                 # if no langauge tokens available, insert silence token
                 else:
                     language_tokens[b,t] = SILENCE_TOKEN_ID # if no words, use silence token.
-            assert len(tokens_queue)==0, "while assigning words to frames, "+len(tokens_queue)+" tokens were unassigned due to not enough silence at the end"
+            assert len(tokens_queue)==0, "while assigning words to frames, "+len(tokens_queue)+" tokens were unassigned due to more words than frames/D"
 
-        return language_tokens
+
+        input_words = language_tokens[:,:-1,:] # input words are all words except last one
+
+        labels = language_tokens[:,1:,:] # label words are the tokens 1 ahead of input tokens
+
+
+        return input_words, labels
 
     def _agent_words_to_string(self, words):
         strings = self.tokenizer.decode(words)    

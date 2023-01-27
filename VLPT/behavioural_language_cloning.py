@@ -32,7 +32,7 @@
 
 --- OPTIMIZE
 - put VPT and LM on different GPU
-- DataParrallel and OGtransfoxlDataParallel
+- DataParrallel and OGtransfoxlDataParallel.  - maybe just wrap whol model in OGtransfoxlDataParallel?
 - test:
     IDM prediction on labelled dataset -> store
     VPT prediction on labelled dataset
@@ -80,7 +80,7 @@ check different way of looking at learn representations: attention in LM over ti
 ------ HYPERPARAMS:
 
 ###DATASET
-episode length = first 0 mins| based on: openAI used first  mins for 'early game' finetuning, longer for others. Not long anough for long term langauge stuff.
+episode length = first 10 mins| based on: openAI used first  mins for 'early game' finetuning, longer for others. Not long anough for long term langauge stuff.
 
 ### XLRECURRENCE
 LM_tgt_len = 256 |227 | based on: in order for LM to see past 10 minutes (assuming 50ms per frame, mem_len = tgt_len(?), ). 10 minutes good, needs  to see algnauge, neeed to keep LM intact: it was trained on mem = 384 tgt=384, so we need to get as close as possible. 256 is close, although we still get silence tokens I dont think results should be clear at these numbers and I think higher is probably too expensive. transfoxl was trained even with tgt=128 wiht useful results
@@ -177,8 +177,9 @@ VPT_FINETUNE_LEARNING_RATE = 0.000181
 WEIGHT_DECAY = 0.039428
 MAX_GRAD_NORM = 5.0
 
-VPT_WEIGHTS_FILE = 
-VPT_MODEL_FILE = 
+VPT_MODEL_FILE = '2x.model'
+VPT_WEIGHTS_FILE = 'rl_from_early_game'
+# VPT model automatically downloads transfo_xl weights from HuggingFace and uses those for LM. If weights include the LM it should be overwritten though?
 
 num_videos = 6000
 max_train_steps = num_videos/int(600000/SEQ_LEN)    # 10 mins per video = 600000 ms -> 4687 chunks of 128 frames. want 1000 hours video = 60,000 minutes = 6,000 videos of 10 minutes each
@@ -197,30 +198,36 @@ def load_model_parameters(path_to_model_file):
 
 
 
-### ---------------------- initialise BLC agent
-### VPT INIT
-agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(VPT_MODEL_FILE)
-# To create model with the right environment.
-# All basalt environments have the same settings, so any of them works here
-env = gym.make("MineRLBasaltFindCave-v0")
-agent = MineRLAgent(env, device=DEVICE, policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs).to(DEVICE)
-agent.load_weights(VPT_WEIGHTS_FILE)
-env.close()
-trainable_parameters = agent.policy.parameters()
-#initiliase VPT memories to empty
-VPT_state = None
 
-### LM INIT
-# initialise LM memories to empty
-LM_state = None
 
-# define optimizer
-optimizer = th.optim.AdamW(
+
+
+def BLC_train(data_dir, in_model, in_weights, out_weights):
+
+
+
+   ### ---------------------- initialise BLC agent
+    ### VPT INIT
+    agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(VPT_MODEL_FILE)
+    # To create model with the right environment.
+    # All basalt environments have the same settings, so any of them works here
+    agent = MineRLAgent(device=DEVICE, policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs).to(DEVICE)
+    agent.load_weights(VPT_WEIGHTS_FILE)
+    trainable_parameters = agent.policy.parameters()
+    #initiliase VPT memories to empty
+    VPT_state = None
+
+    ### LM INIT
+    # initialise LM memories to empty
+    LM_state = None
+
+    # define optimizer
+    optimizer = th.optim.AdamW(
                 trainable_parameters,
                 lr=peak_learning_rate,
                 weight_decay=WEIGHT_DECAY)
 
-lr_schedule = CosineAnnealingWarmupRestarts(optimizer,
+    lr_schedule = CosineAnnealingWarmupRestarts(optimizer,
                 first_cycle_steps=max_train_steps,
                 cycle_mult=1.0,
                 max_lr=peak_learning_rate,
@@ -231,27 +238,37 @@ lr_schedule = CosineAnnealingWarmupRestarts(optimizer,
 
 
 
-### ---------------------------- initialise dataset and training
-## Data Loader init
-data_loader = DataLoader(
+    ### ---------------------------- initialise dataset and training
+    ## Data Loader init
+    train_data_loader = DataLoader(
     dataset_dir=DATASET+'/train',
     n_workers=N_WORKERS,
     batch_size=BATCH_SIZE,
     seq_len = SEQ_LEN,
     n_epochs=EPOCHS)
 
+    # load examples 128*40 frames
+    # load example actions
+    # load example actions
+    ## Data Loader init
+    eval_data_loader = DataLoader(
+    dataset_dir=DATASET+'/valid',
+    n_workers=8,
+    batch_size=8, # to keep evaluation simple, thuogh possibly less accurate, we will just evaluate against the same [batch size] sequences. since its on fairly long sequcnes given the XL nature, this should still givne enough data points for some kind of useful evaluation
+    seq_len=SEQ_LEN,
+    n_epochs=EPOCHS)
 
-# start training loop
-start_time = time.time()
-is_first_frame = th.zeros((BATCH_SIZE, SEQ_LEN), dtype=th.bool).to(DEVICE)
-current_video_group_id = 0
-current_batch = 0
 
-def BLC_train(data_dir, in_model, in_weights, out_weights):
-    global agent, current_video_group_id, current_batch, 
 
+
+
+    # --------------------------- start training loop
+    is_first_frame = th.zeros((BATCH_SIZE, SEQ_LEN), dtype=th.bool).to(DEVICE)
+    current_video_group_id = 0
+    current_batch = 0
+    start_time = time.time()
     # get multiple steams of 10 minutes* video across multiple batches. continue until (to ensure lanauge model sees far back langauge)
-    for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(data_loader):
+    for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(train_data_loader):
 
         # multiple batches from the same video group will occur in a row. Dont reset memory until a different video group comes along.
         if current_video_group_id != video_group_id:
@@ -260,27 +277,27 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
             current_video_group_id = video_group_id
 
 
-        ### ------------- format input from data loader to agent        
+        ### --- FORMAT INPUT      
         # format input frames
         x_frames = agent._video_obs_to_agent(batch_frames['img'])
         # format input/label words
-        x_words, last_future_words = agent._words_to_agent(batch_words['token_ids'], batch_words['ms'])
+        x_words, y_words = agent._words_to_agent(batch_words['token_ids'], batch_words['ms'])
         #format action labels
         #actions_formatted = th.zeros([BATCH_SIZE, SEQ_LEN])        # NULL ACTIONS NOT REMOVED: this is probably fine because we still get rid of al lot of null actions (any that happend with no paired word. thjis is done to maintain language integrity and timings). We can mask NULL actions now though. Probably should to maintain comparability to VPT, but this will proabbly hurt performance - VPT suggests getting rid of most but not all NULL actionsm which this probably does. IDK
         action_labels = agent._env_action_to_agent(batch_actions, to_torch=True, check_if_null=False) 
         #actions_formatted[b,t] = action
 
 
-        ### ----------- feed batch of input sequences (frames and paired language tokens) to agent and get output action and 
+        ### --- PREDICT (input frames and paired language tokens). Get output VPT actions, and LM loss
         pi_distribution, _, VPT_state, LM_state, LM_loss = agent.policy.get_output_for_observation(
-                                                                    ob_words=x_words,
-                                                                    ob_frames=x_frames,
-                                                                    VPT_state_in=VPT_state,
-                                                                    context=is_first_frame,
-                                                                    LM_state=LM_state,
-                                                                    LM_active_timestep=True,
-                                                                    last_future_words=None,
-                                                                    last_future_words=last_future_words)
+                                                                                                    ob_words=x_words,
+                                                                                                    ob_frames=x_frames,
+                                                                                                    VPT_state_in=VPT_state,
+                                                                                                    context=is_first_frame,
+                                                                                                    LM_state=LM_state,
+                                                                                                    LM_active_timestep=True,
+                                                                                                    last_future_words=None,
+                                                                                                    LM_labels=y_words)
 
         # (fails with current accumulation). # Make sure we do not try to backprop through sequence in future iterations
         VPT_state = tree_map(lambda x: x.detach(), VPT_state)
@@ -300,29 +317,25 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
             print(f"Time: {time_since_start:.2f}, Batches: {batch_i}, Avrg loss: {loss_sum / LOSS_REPORT_RATE:.4f}")
             loss_sum = 0
         if batch_i % EVALUATION_RATE == 0:
-            eval_loss = BLC_evaluate()
+            LM_eval_loss, VPT_eval_loss, BLC_loss = BLC_evaluate()
+            print(f"Eval: LM_loss, VPT_loss", LM_eval_loss, VPT_eval_loss, BLC_loss)
         
-            
+        
         state_dict = agent.policy.state_dict()
         th.save(state_dict, out_weights)
 
 
-def BLC_evaluate(agent):
+def BLC_evaluate():
+    global agent
 
 
-    # load examples 128*40 frames
-    # load example actions
-    # load example actions
-    ## Data Loader init
-    data_loader = DataLoader(
-        dataset_dir=DATASET+'/valid',
-        n_workers=1,
-        batch_size=2,
-        seq_len=SEQ_LEN,
-        n_epochs=EPOCHS)
 
-    for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(data_loader):
-        video_group_id
+    # we dont want to disrupt internal states of training during eval so we use fresh ones
+    eval_LM_state = None
+    eval_VPT_state = None
+    for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(eval_data_loader):
+
+
         ### ------------- format input from data loader to agent        
         # format input frames
         x_frames = agent._video_obs_to_agent(batch_frames['img'])
@@ -333,8 +346,24 @@ def BLC_evaluate(agent):
         action_labels = agent._env_action_to_agent(batch_actions, to_torch=True, check_if_null=False) 
         #actions_formatted[b,t] = action
 
-    # agent estimate 10 video sequence batches of 512 with same tgt_len and mem_len
+        ### ----------- feed batch of input sequences (frames and paired language tokens) to agent and get output action and 
+        pi_distribution, _, VPT_state, LM_state, LM_loss = agent.policy.get_output_for_observation(
+                                                                                                    ob_words=x_words,
+                                                                                                    ob_frames=x_frames,
+                                                                                                    VPT_state_in=eval_VPT_state,
+                                                                                                    context=is_first_frame,
+                                                                                                    LM_state=eval_LM_state,
+                                                                                                    LM_active_timestep=True,
+                                                                                                    last_future_words=None,
+                                                                                                    last_future_words=last_future_words)
 
+        LM_loss = LM_loss
+        VPT_loss  = -agent.policy.get_logprob_of_action(pi_distribution, action_labels)
+        BLC_loss = VPT_loss + LM_loss
+
+        return LM_loss, VPT_loss, BLC_loss
+
+    # agent estimate 10 video sequence batches of 512 with same tgt_len and mem_len
 
 
 
@@ -348,7 +377,7 @@ if __name__ == "__main__":
     parser.add_argument("--out-weights", required=True, type=str, help="Path where finetuned weights will be saved")
 
     args = parser.parse_args()
-    behavioural_cloning_train(args.data_dir, args.in_model, args.in_weights, args.out_weights)
+    BLC_train(args.data_dir, args.in_model, args.in_weights, args.out_weights)
 
 
 
