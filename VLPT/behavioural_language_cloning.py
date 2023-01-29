@@ -42,7 +42,7 @@
     IDM prediction on labelled dataset (YT480p) -> store
     VPT prediction on labelled dataset (YT2480p)
     VPT prediction on stored (YT480p) IDM labels
-- IMPLEMENT D/LM_TIMEOUT
+- VLPT: fuse hidden states in and out of lm - allow LM to se VPT mem in layer below. allow VPT 3 to see LM mem
 - currently, TransformerXL's softmx classification layer only either support gettings the loss or predicting wor dprobabilities, not both. This means that it must be passed through twice in ordre to get both, which is slow. TO optimize, finda  way to sample AdaptiveLogSoftmax while getting loss.
 
 - check PaLI/Flamingo paper for training procedure: KL, losses...
