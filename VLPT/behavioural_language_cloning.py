@@ -23,12 +23,9 @@
 """
 
 --- FIX
-- Do: audio -> tokens + tokens ms -> save to file
-- Edit DataLoader: load transcipt.file
-- add val_loss iteration every 100 batches: VLPT_val_loss, LM_val_loss, LM_wt103_loss NOTE: scraping web, will probably get some same videos as VPT paper, may result in overfitting. we are using RL finetuned model o hopefully that made it forget but just be careful. Might need dropout but try first without. also remove dropout form LM, wont train for many epochs, can get a LOT of data
-- save model every 10000 batches: for MineRL assessment through time.
+- Edit DataLoader: load transcipt.file and give out SEQ_LEN frames, SEQ_LEN actions and all words in episode
 - Data Loader: (if doesnt fit in batch,m just discard batch, end episode early) (send episode_ended signal to clear hidden state when done. How to clear hidden state? how hidden staet batch???)
-- IGNORE: just set D=1 and progress and dont worry about batch and grad accum rates and tgt_len differences compensation in batch handling arghh
+
 
 --- OPTIMIZE
 - put VPT and LM on different GPU
@@ -117,6 +114,7 @@ import gym
 import minerl
 import torch as th
 import numpy as np
+from lib.data_parallel import BalancedDataParallel
 
 from agent import PI_HEAD_KWARGS, MineRLAgent
 from data_loader import DataLoader
@@ -171,20 +169,34 @@ N_WORKERS = 8
 SEQ_LEN = 512  # WE WANT 10 minutes of langauge that LM can look back on:  ( seq_len*18*D*50 ) / (1000*60)      @seq_len=256, D=1 this is about 4 mins. Sequence length needs to be chosen so that when VPT predict this many frames it proved LM with tgt_len inputs to predict with. adjusting this threfore adjsuts tgt_len and how far back in time LM can see during training.
 DEVICE = "cuda"
 LOSS_REPORT_RATE = 100
-EVALUATION_RATE = 1000
+EVALUATION_RATE = 100
 
-VPT_FINETUNE_LEARNING_RATE = 0.000181
-WEIGHT_DECAY = 0.039428
-MAX_GRAD_NORM = 5.0
+# PaLI:
+#     train: 0.02Adafactor    fintune:0.001adafactor
+# LM: train:0.01adafactor  finetune:0.001adafactor
+# V:  train:0.0008
+
+# Flamingo
+# 0.0001 adamw
+# LM 0.0001 adamw
+
+#BCT
+#VPT: 0.002147Adam  finetune:0.000181Adam
+#LM:  0.00025Adam   finetune:
+VPT_FINETUNE_LEARNING_RATE = 0.00025 # VPT paper sugests 0.000181: [we are training to a very different task], [VPT uses linear learning rate decay], [] # to keep the LM intact I dont want to go higher tha its peak laerning rate. finetuning a multimdodal LM with the same peak lr seems ok according to PaLI,Flamingo but they also train on other tasks, maybe just keep some minecraft data for langauge training?
+WEIGHT_DECAY = 0.039428 
+MAX_GRAD_NORM_VPT = 5.0 # VPT says 5.0, transfoXL says 0.25. We will basically c
+MAX_GRAD_NORM_LM = 0.25 # VPT says 5.0, transfoXL says 0.25. We will basically c
+TRAINING_LOG_FILE = 'training_log.txt'
 
 VPT_MODEL_FILE = '2x.model'
 VPT_WEIGHTS_FILE = 'rl_from_early_game'
 # VPT model automatically downloads transfo_xl weights from HuggingFace and uses those for LM. If weights include the LM it should be overwritten though?
 
 num_videos = 6000
-max_train_steps = num_videos/int(600000/SEQ_LEN)    # 10 mins per video = 600000 ms -> 4687 chunks of 128 frames. want 1000 hours video = 60,000 minutes = 6,000 videos of 10 minutes each
+max_train_steps = (num_videos*600000)/(SEQ_LEN*BATCH_SIZE)    # 10 mins per video = 600000 ms -> 4687 chunks of 128 frames. want 1000 hours video = 60,000 minutes = 6,000 videos of 10 minutes each
 peak_learning_rate = 0.0002
-warmup_steps = max_train_steps(0.08)
+warmup_steps = min(1000, max_train_steps*0.03) # warmup should be very short since the transformers are pretrained # PaLI uses 1k warmup steps, obviously dont want to do more
 
 
 
@@ -203,8 +215,8 @@ def load_model_parameters(path_to_model_file):
 
 
 def BLC_train(data_dir, in_model, in_weights, out_weights):
-
-
+    global eval_data_loader, para_model, agent # for eval function
+    lowest_val_loss = float('inf')
 
    ### ---------------------- initialise BLC agent
     ### VPT INIT
@@ -213,7 +225,12 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
     # All basalt environments have the same settings, so any of them works here
     agent = MineRLAgent(device=DEVICE, policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs).to(DEVICE)
     agent.load_weights(VPT_WEIGHTS_FILE)
+    policy = agent.policy
     trainable_parameters = agent.policy.parameters()
+    if args.gpu0_bsz >= 0:
+        para_model = BalancedDataParallel(args.gpu0_bsz // args.batch_chunk, policy, dim=1).to(device)
+    else:
+        para_model = policy #th.nn.DataParallel(policy, dim=1).to(device) # I think this fails? HF said this is bugged, right?
     #initiliase VPT memories to empty
     VPT_state = None
 
@@ -261,7 +278,6 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
 
 
 
-
     # --------------------------- start training loop
     is_first_frame = th.zeros((BATCH_SIZE, SEQ_LEN), dtype=th.bool).to(DEVICE)
     current_video_group_id = 0
@@ -273,7 +289,7 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
         # multiple batches from the same video group will occur in a row. Dont reset memory until a different video group comes along.
         if current_video_group_id != video_group_id:
             is_first_frame[:,...] = True
-            agent.policy.LM.reset_mem()
+            para_model.LM.reset_mem()
             current_video_group_id = video_group_id
 
 
@@ -289,7 +305,7 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
 
 
         ### --- PREDICT (input frames and paired language tokens). Get output VPT actions, and LM loss
-        pi_distribution, _, VPT_state, LM_state, LM_loss = agent.policy.get_output_for_observation(
+        pi_distribution, _, VPT_state, LM_state, LM_loss = para_model.get_output_for_observation(
                                                                                                     ob_words=x_words,
                                                                                                     ob_frames=x_frames,
                                                                                                     VPT_state_in=VPT_state,
@@ -299,69 +315,96 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
                                                                                                     last_future_words=None,
                                                                                                     LM_labels=y_words)
 
-        # (fails with current accumulation). # Make sure we do not try to backprop through sequence in future iterations
-        VPT_state = tree_map(lambda x: x.detach(), VPT_state)
-        VPT_loss  = -agent.policy.get_logprob_of_action(pi_distribution, action_labels)
 
-        # ------------ optimize model
+
+        # --- optimize model
         BLC_loss = VPT_loss + LM_loss
         BLC_loss.backward()
-        th.nn.utils.clip_grad_norm_(trainable_parameters, MAX_GRAD_NORM)
+        th.nn.utils.clip_grad_norm_(trainable_parameters, MAX_GRAD_NORM_VPT)
+        # clip LM gradient to a smaller clip value
+        for parameter in para_model.net.LM:
+            if parameter.requires_grad:
+                th.nn.utils.clip_grad_norm_(parameter, MAX_GRAD_NORM_LM)
         optimizer.step()
-        optimizer.zero_grad()
+        # zero grads
+        for param in trainable_parameters:     #https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html
+            param.grad = None
         lr_schedule.step()
 
+
+
+        # # Make sure we do not try to backprop through sequence in future iterations
+        # (fails with current accumulation). 
+        # LM does this internally automatically.
+        VPT_state = tree_map(lambda x: x.detach(), VPT_state)
+        VPT_loss  = -para_model.get_logprob_of_action(pi_distribution, action_labels)
+
+
+
+        # --- keep track of model loss and val loss, save model if new best val_loss (on all 3 tasks)
         loss_sum += VPT_loss
         if batch_i % LOSS_REPORT_RATE == 0:
             time_since_start = time.time() - start_time
-            print(f"Time: {time_since_start:.2f}, Batches: {batch_i}, Avrg loss: {loss_sum / LOSS_REPORT_RATE:.4f}")
+            line = str(f"Time: {time_since_start:.2f}, Batches: {batch_i}, Avrg loss: {loss_sum / LOSS_REPORT_RATE:.4f}")
+            with open('training_log.txt','a') as file:
+                file.write(line)
             loss_sum = 0
         if batch_i % EVALUATION_RATE == 0:
             LM_eval_loss, VPT_eval_loss, BLC_loss = BLC_evaluate()
-            print(f"Eval: LM_loss, VPT_loss", LM_eval_loss, VPT_eval_loss, BLC_loss)
-        
-        
-        state_dict = agent.policy.state_dict()
-        th.save(state_dict, out_weights)
+            line=str("Eval: LM_loss, VPT_loss, BLC_loss: %s" %(LM_eval_loss, VPT_eval_loss, BLC_loss))
+            with open('training_log.txt','a') as file:
+                file.write(line)
+            # save a model if ALL losses are lower
+            save_model=True
+            for loss_lowest, loss_new in zip(lowest_val_loss, [LM_eval_loss, VPT_eval_loss, BLC_loss]):
+                if loss_lowest < loss_new:
+                    save_model = False
+            if save_model:
+                state_dict = para_model.state_dict()
+                th.save(state_dict, out_weights+str(batch_i))
+
+
+
 
 
 def BLC_evaluate():
-    global agent
+    with th.no_grad():
+        global agent, eval_data_loader, para_model
 
 
+        is_first_frame = th.zeros((BATCH_SIZE, SEQ_LEN), dtype=th.bool).to(DEVICE)
 
-    # we dont want to disrupt internal states of training during eval so we use fresh ones
-    eval_LM_state = None
-    eval_VPT_state = None
-    for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(eval_data_loader):
+        # we dont want to disrupt internal states of training during eval so we use fresh ones
+        eval_LM_state = None
+        eval_VPT_state = None
+        for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(eval_data_loader):
 
 
-        ### ------------- format input from data loader to agent        
-        # format input frames
-        x_frames = agent._video_obs_to_agent(batch_frames['img'])
-        # format input/label words
-        x_words, last_future_words = agent._words_to_agent(batch_words['token_ids'], batch_words['ms'])
-        #format action labels
-        #actions_formatted = th.zeros([BATCH_SIZE, SEQ_LEN])        # NULL ACTIONS NOT REMOVED: this is probably fine because we still get rid of al lot of null actions (any that happend with no paired word. thjis is done to maintain language integrity and timings). We can mask NULL actions now though. Probably should to maintain comparability to VPT, but this will proabbly hurt performance - VPT suggests getting rid of most but not all NULL actionsm which this probably does. IDK
-        action_labels = agent._env_action_to_agent(batch_actions, to_torch=True, check_if_null=False) 
-        #actions_formatted[b,t] = action
+            ### ------------- format input from data loader to agent        
+            # format input frames
+            x_frames = agent._video_obs_to_agent(batch_frames['img'])
+            # format input/label words
+            x_words, y_words = agent._words_to_agent(batch_words['token_ids'], batch_words['ms'])
+            #format action labels
+            #actions_formatted = th.zeros([BATCH_SIZE, SEQ_LEN])        # NULL ACTIONS NOT REMOVED: this is probably fine because we still get rid of al lot of null actions (any that happend with no paired word. thjis is done to maintain language integrity and timings). We can mask NULL actions now though. Probably should to maintain comparability to VPT, but this will proabbly hurt performance - VPT suggests getting rid of most but not all NULL actionsm which this probably does. IDK
+            action_labels = agent._env_action_to_agent(batch_actions, to_torch=True, check_if_null=False) 
+            #actions_formatted[b,t] = action
 
-        ### ----------- feed batch of input sequences (frames and paired language tokens) to agent and get output action and 
-        pi_distribution, _, VPT_state, LM_state, LM_loss = agent.policy.get_output_for_observation(
-                                                                                                    ob_words=x_words,
-                                                                                                    ob_frames=x_frames,
-                                                                                                    VPT_state_in=eval_VPT_state,
-                                                                                                    context=is_first_frame,
-                                                                                                    LM_state=eval_LM_state,
-                                                                                                    LM_active_timestep=True,
-                                                                                                    last_future_words=None,
-                                                                                                    last_future_words=last_future_words)
+            ### ----------- feed batch of input sequences (frames and paired language tokens) to agent and get output action and 
+            pi_distribution, _, VPT_state, LM_state, LM_loss = para_model.get_output_for_observation(
+                                                                                                        ob_words=x_words,
+                                                                                                        ob_frames=x_frames,
+                                                                                                        LM_labels=y_words,
+                                                                                                        VPT_state_in=eval_VPT_state,
+                                                                                                        LM_state=eval_LM_state,
+                                                                                                        context=is_first_frame,
+                                                                                                        LM_active_timestep=True)
 
-        LM_loss = LM_loss
-        VPT_loss  = -agent.policy.get_logprob_of_action(pi_distribution, action_labels)
-        BLC_loss = VPT_loss + LM_loss
+            LM_loss = LM_loss
+            VPT_loss  = -agent.policy.get_logprob_of_action(pi_distribution, action_labels)
+            BLC_loss = VPT_loss + LM_loss
 
-        return LM_loss, VPT_loss, BLC_loss
+            return LM_loss, VPT_loss, BLC_loss
 
     # agent estimate 10 video sequence batches of 512 with same tgt_len and mem_len
 

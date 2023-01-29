@@ -13,10 +13,7 @@ tokenizer = TransfoXLTokenizer.from_pretrained("transfo-xl-wt103")
 # https://github.com/jianfch/stable-ts
 from stable_whisper import load_model
 from stable_whisper import stabilize_timestamps
-model = load_model('base')        
-stab_segments = results['segments']
-first_segment_word_timestamps = stab_segments[0]['whole_word_timestamps']
-print(first_segment_word_timestamps)
+model = load_model('base')
 
 
 
@@ -27,16 +24,20 @@ def audio_to_tokens_ms(audio_file, output_name):
     ASR_words=[]
     ASR_secs=[]
     results = model.transcribe(audio_file)
-    stabilize_timestamps(results, top_focus=True)
-    
+    stab_segments = results['segments']
+    first_segment_word_timestamps = stab_segments[0]['whole_word_timestamps']
+    stab_segments = stabilize_timestamps(results, top_focus=True)
+    print(stab_segments)
+
 
     
-    # convert words to tokens for agent and transfer ms timestamps accordingly - HARD. NOTE: ASSUMES THAT decode(ASR_tokenizer(text)) = decode(GPT2_tokenizer(text)), WHICH MAY NOT BE TRUE
+    # convert words to agent's LM tokens and transfer ms timestamps accordingly - HARD. NOTE: ASSUMES THAT decode(ASR_tokenizer(text)) = decode(GPT2_tokenizer(text)), WHICH MAY NOT BE TRUE
+    # NOTE: The Transfo_XL LM used has not BOS token. This code keeps this in mind
     string = ''.join(ASR_words)
     agent_words = tokenizer(string)['token_ids']
-    word_ms = [-50]*len(agent_words)
+    word_ms = [0]*len(agent_words)
     tok1_index,ch1_index = 0,0
-    tok2_index,ch2_index = 1,0 # start comparing tokens after BOS token. conveniently, this also sets BOS timestamp at ms=-50. 
+    tok2_index,ch2_index = 0,0
     current_token_timestamps = []
     while tok2_index<len(agent_words): # keep going until all agent words have timestamps
         char1 = ASR_words[tok1_index][ch1_index]
@@ -78,10 +79,10 @@ def audio_to_tokens_ms(audio_file, output_name):
 
 
 audio_folder = '..audio/folder'
-audio_files = os.list_files(audio_file)
+audio_files = os.list_files(audio_folder)
 for file in audio_files:
-    output_name = file.split('.opus')[0]+'.txt'
-    audio_to_tokens_ms(file, file)
+    output_name = file.split('.')[0:-1]+'.txt'
+    audio_to_tokens_ms(audio_folder+file, file)
 
 
 
