@@ -6,5 +6,6 @@ VLPT/cheeky-cornflower-setter-02e496ce4abb-20220421-092639.jsonl
 VLPT/cheeky-cornflower-setter-02e496ce4abb-20220421-092639.mp4
 VLPT/lib/__pycache__*
 *.pyc
-Data Gathering/spamham_samples*
+Data Gathering/spamham_samples/frames/*
 Data Gathering/DATASET*
+*.mp4

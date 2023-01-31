@@ -153,7 +153,7 @@ so video sequences are kept continuous and all made to end when the videos are o
 
 
 
-
+scaler = th.cuda.amp.GradScaler()
 
 
 
@@ -181,21 +181,27 @@ EVALUATION_RATE = 100
 # LM 0.0001 adamw
 
 #BCT
-#VPT: 0.002147Adam  finetune:0.000181Adam
-#LM:  0.00025Adam   finetune:
-VPT_FINETUNE_LEARNING_RATE = 0.00025 # VPT paper sugests 0.000181: [we are training to a very different task], [VPT uses linear learning rate decay], [] # to keep the LM intact I dont want to go higher tha its peak laerning rate. finetuning a multimdodal LM with the same peak lr seems ok according to PaLI,Flamingo but they also train on other tasks, maybe just keep some minecraft data for langauge training?
-WEIGHT_DECAY = 0.039428 
-MAX_GRAD_NORM_VPT = 5.0 # VPT says 5.0, transfoXL says 0.25. We will basically c
-MAX_GRAD_NORM_LM = 0.25 # VPT says 5.0, transfoXL says 0.25. We will basically c
-TRAINING_LOG_FILE = 'training_log.txt'
+#VPT: 0.002147Adam  finetune:0.000181Adam, weight decay 
+
+# transfo_xl:
+#LM:  0.00025Adam. Weight decay=PyTorchdefault=0 . suggested = 0.01
+
+VPT_LEARNING_RATE = 0.00025 # VPT paper sugests 0.000181: [we are training to a very different task], [VPT uses linear learning rate decay], [] # to keep the LM intact I dont want to go higher tha its peak laerning rate. finetuning a multimdodal LM with the same peak lr seems ok according to PaLI,Flamingo but they also train on other tasks, maybe just keep some minecraft data for langauge training?
+VPT_WEIGHT_DECAY = 0.039428 # VPT weigh decay. transfoxl weight decay is 
+VPT_MAX_GRAD_NORM = 5.0 # VPT says 5.0, transfoXL says 0.25. We will basically c
+
+LM_LEARNING_RATE = 0.00025 # both LRs are actually set to be the same by the scheduler anyway. double check if they should be different and adjust accordingly. These learning rates are tiny, but maybe transformer_xls need it?
+LM_WEIGHT_DECAY = 0.01 # avoid LM helping VPT to overfit
+LM_MAX_GRAD_NORM = 0.25 # VPT says 5.0, transfoXL says 0.25. We will basically c
+
 
 VPT_MODEL_FILE = '2x.model'
 VPT_WEIGHTS_FILE = 'rl_from_early_game'
+TRAINING_LOG_FILE = 'training_log.txt'
 # VPT model automatically downloads transfo_xl weights from HuggingFace and uses those for LM. If weights include the LM it should be overwritten though?
 
 num_videos = 6000
 max_train_steps = (num_videos*600000)/(SEQ_LEN*BATCH_SIZE)    # 10 mins per video = 600000 ms -> 4687 chunks of 128 frames. want 1000 hours video = 60,000 minutes = 6,000 videos of 10 minutes each
-peak_learning_rate = 0.0002
 warmup_steps = min(1000, max_train_steps*0.03) # warmup should be very short since the transformers are pretrained # PaLI uses 1k warmup steps, obviously dont want to do more
 
 
@@ -227,6 +233,7 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
     agent.load_weights(VPT_WEIGHTS_FILE)
     policy = agent.policy
     trainable_parameters = agent.policy.parameters()
+
     if args.gpu0_bsz >= 0:
         para_model = BalancedDataParallel(args.gpu0_bsz // args.batch_chunk, policy, dim=1).to(device)
     else:
@@ -238,16 +245,26 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
     # initialise LM memories to empty
     LM_state = None
 
-    # define optimizer
+    # define optimizer # we have slightly difference hyperparameters for VPT and LM. This is partially based on the fact that their respective papers use quite different values,
+    # the difference in architecture due to that,
+    # and because VPT is very likely to overfit: it has been finetuned on rl so its weights are departed from its video/behavioural-cloning pretraining (although not that much ebcause of the KL-loss term), but we are likely going to get data from 
+    # videos that that paper pulled since it trained on so much data. We will be training on some stuff that wasnt in the BC finetuning since we are using the early-game model which only used first 5 mins are we are using first 10 for lagnauge input purposes. However, the foundation model still mght have seen all of this.
+    # regardless, VPT is advised to have and likely should have a high weight decay while the LM was trained without one, and adding such a high weight decay would likely destroy it. We cannot rely on KL-loss since the LM is being pruposely trained to behave very differently to its original - the KL loss target would only produce useless noise du to teh Xattn inpuot adn silence tokens, so it is just bad for performance to use it as a reference
+    VPT_parameters=[]
+    LM_parameters = para_model.net.LM.parameters() # need to treat LM more with more fragility than rest of model. weight decay mainly, since VPT is likely already overfitting but LM is getting completely new data. include LM input XATNN gate
+    for param in para_model.net.Xattn_VPT_LM.parameters():
+        LM_parameters.append(param)
+    for param in trainable_parameters:
+        if not (param in LM_parameters): 
+            VPT_parameters.append(param) # include LM output Xattn
     optimizer = th.optim.AdamW(
-                trainable_parameters,
-                lr=peak_learning_rate,
-                weight_decay=WEIGHT_DECAY)
+                [{'params': VPT_parameters, 'lr': VPT_LEARNING_RATE, 'weight_decay':VPT_WEIGHT_DECAY},
+                {'params': LM_parameters, 'lr': LM_LEARNING_RATE, 'weight_decay':LM_WEIGHT_DECAY}])
 
     lr_schedule = CosineAnnealingWarmupRestarts(optimizer,
                 first_cycle_steps=max_train_steps,
                 cycle_mult=1.0,
-                max_lr=peak_learning_rate,
+                max_lr=LM_LEARNING_RATE,  #@ WARNING: this sets both VPT and LM learnig rates to the same. For now this is okay because they are the same anyway, but this will need modifying if different learning rates are used in the end
                 min_lr=0.0,
                 warmup_steps=1000,
                 gamma=1.0)
@@ -286,50 +303,55 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
     # get multiple steams of 10 minutes* video across multiple batches. continue until (to ensure lanauge model sees far back langauge)
     for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(train_data_loader):
 
-        # multiple batches from the same video group will occur in a row. Dont reset memory until a different video group comes along.
-        if current_video_group_id != video_group_id:
-            is_first_frame[:,...] = True
-            para_model.LM.reset_mem()
-            current_video_group_id = video_group_id
-
-
-        ### --- FORMAT INPUT      
-        # format input frames
-        x_frames = agent._video_obs_to_agent(batch_frames['img'])
-        # format input/label words
-        x_words, y_words = agent._words_to_agent(batch_words['token_ids'], batch_words['ms'])
-        #format action labels
-        #actions_formatted = th.zeros([BATCH_SIZE, SEQ_LEN])        # NULL ACTIONS NOT REMOVED: this is probably fine because we still get rid of al lot of null actions (any that happend with no paired word. thjis is done to maintain language integrity and timings). We can mask NULL actions now though. Probably should to maintain comparability to VPT, but this will proabbly hurt performance - VPT suggests getting rid of most but not all NULL actionsm which this probably does. IDK
-        action_labels = agent._env_action_to_agent(batch_actions, to_torch=True, check_if_null=False) 
-        #actions_formatted[b,t] = action
-
-
-        ### --- PREDICT (input frames and paired language tokens). Get output VPT actions, and LM loss
-        pi_distribution, _, VPT_state, LM_state, LM_loss = para_model.get_output_for_observation(
-                                                                                                    ob_words=x_words,
-                                                                                                    ob_frames=x_frames,
-                                                                                                    VPT_state_in=VPT_state,
-                                                                                                    context=is_first_frame,
-                                                                                                    LM_state=LM_state,
-                                                                                                    LM_active_timestep=True,
-                                                                                                    last_future_words=None,
-                                                                                                    LM_labels=y_words)
-
-
-
-        # --- optimize model
-        BLC_loss = VPT_loss + LM_loss
-        BLC_loss.backward()
-        th.nn.utils.clip_grad_norm_(trainable_parameters, MAX_GRAD_NORM_VPT)
-        # clip LM gradient to a smaller clip value
-        for parameter in para_model.net.LM:
-            if parameter.requires_grad:
-                th.nn.utils.clip_grad_norm_(parameter, MAX_GRAD_NORM_LM)
-        optimizer.step()
         # zero grads
         for param in trainable_parameters:     #https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html
             param.grad = None
         lr_schedule.step()
+
+        with th.cuda.amp.autocast(device_type='cuda', dtype=th.float16): #https://pytorch.org/docs/master/notes/amp_examples.html#gradient-clipping
+            # multiple batches from the same video group will occur in a row. Dont reset memory until a different video group comes along.
+            if current_video_group_id != video_group_id:
+                is_first_frame[:,...] = True
+                para_model.LM.reset_mem()
+                current_video_group_id = video_group_id
+
+
+            ### --- FORMAT INPUT      
+            # format input frames
+            x_frames = agent._video_obs_to_agent(batch_frames['img'])
+            # format input/label words
+            x_words, y_words = agent._words_to_agent(batch_words['token_ids'], batch_words['ms'])
+            #format action labels
+            #actions_formatted = th.zeros([BATCH_SIZE, SEQ_LEN])        # NULL ACTIONS NOT REMOVED: this is probably fine because we still get rid of al lot of null actions (any that happend with no paired word. thjis is done to maintain language integrity and timings). We can mask NULL actions now though. Probably should to maintain comparability to VPT, but this will proabbly hurt performance - VPT suggests getting rid of most but not all NULL actionsm which this probably does. IDK
+            action_labels = agent._env_action_to_agent(batch_actions, to_torch=True, check_if_null=False) 
+            #actions_formatted[b,t] = action
+
+
+            ### --- PREDICT (input frames and paired language tokens). Get output VPT actions, and LM loss
+            pi_distribution, _, VPT_state, LM_state, LM_loss = para_model.get_output_for_observation(
+                                                                                                        ob_words=x_words,
+                                                                                                        ob_frames=x_frames,
+                                                                                                        VPT_state_in=VPT_state,
+                                                                                                        context=is_first_frame,
+                                                                                                        LM_state=LM_state,
+                                                                                                        LM_active_timestep=True,
+                                                                                                        last_future_words=None,
+                                                                                                        LM_labels=y_words)
+
+
+
+            # --- optimize model
+            BLC_loss = VPT_loss + LM_loss
+        scaler.scale(BLC_loss).backward()
+        scaler.unscale_(optimizer)
+        # clip LM gradient to a smaller clip value
+        th.nn.utils.clip_grad_norm_(VPT_parameters, VPT_MAX_GRAD_NORM)
+        th.nn.utils.clip_grad_norm_(LM_parameters, LM_MAX_GRAD_NORM)
+        #for parameter in para_model.net.LM.parameters():
+        #    if parameter.requires_grad:
+        #        th.nn.utils.clip_grad_norm_(parameter, MAX_GRAD_NORM_LM)
+        scaler.step(optimizer)
+        scaler.update()
 
 
 
