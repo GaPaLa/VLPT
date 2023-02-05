@@ -1,0 +1,55 @@
+u0oqnHlYzZw
+E19Jaijd7Dg
+awMblI7IGuw
+APm14XlxN_c
+jbu9uzaaycU
+wVfYxc4eavs
+
+https://www.youtube.com/watch?v=BsJJUAGoFBc&list=PLu0hRahvlQEahuFlF_Dc0_1AMmI_UCLz8 (64 hrs)
+https://www.youtube.com/watch?v=DA52bT7TTlc&list=PLu0hRahvlQEbBYdmPQgzjW04NC7_PwWYl (22 hrs)
+https://www.youtube.com/watch?v=qz3mJ_iRQPM&list=PLu0hRahvlQEZrR40HQFmFvRZSh2T63O86 (20 hrs)
+https://www.youtube.com/watch?v=Is91sAIQzqU&list=PLu0hRahvlQEYPeFHZ7aafiHVfZaMfhnJn (24 hrs)
+https://www.youtube.com/watch?v=Yf5Oa2RfGtU&list=PLu0hRahvlQEazonTSsfpmtWuic3dk6jmJ (23 hrs)
+https://www.youtube.com/watch?v=WY__it0vUdk&list=PLvgL9fMpgUKpgGsI4EBRAB-1xM-v0rCJ6 (3 hrs)
+
+
+
+
+https://www.youtube.com/watch?v=3tK671gAbhI&list=PL2z2ZbSRyWgKl_EbWXC_IWMw0-tOG6skl   - NEEDS FILL IN OVER STREAMER (62 hrs)
+https://www.youtube.com/watch?v=1l8_ckppcz4&list=PL3e14exB92LLSXlSYuB2dkaDCOd2dhO7X (14 hrs, cropped, maybe already decent performance, maybe stretch to fit)
+
+https://www.youtube.com/watch?v=npuWcUY-rV0&list=PLXpoJB_JWSErXBaTEQtvJADucjbdh8hBo&index=33 (40 hrs) - NEEDS TO BE MOVED DOWN AND HAVE TOP FEW ROWS FILLED IN
+
+
+
+
+https://www.youtube.com/watch?v=_yNMNHkNFBY&list=PLgENJ0iY3XBiJ0jZ53HT8v9Qa3cch7YEV (138 hrs)  VERY QUESTIONABLE - kind of like creative but great for language - very descriptive of a lot of stuff you see on screen
+
+https://www.youtube.com/watch?v=w-UfWqYFito (18 hrs) WARNING: ASMR WHISPERING - CHECK ASR PERFORMANCE IF ACCEPTABLE
+
+https://www.youtube.com/watch?v=RFX_3uVfsko&list=PLc9pDn2U3uASenohO21eRbBmFXloX9DOh (27 hrs) # crop beginning of each start of the video until actual minecraft game starts
+
+
+https://www.youtube.com/watch?v=bKlZVDhx320&list=PL1523184A958895EF (239) UP TO EPISODE 115 remove top left versioning text SKETCHY
+
+
+https://www.youtube.com/@aliensurferz5537 all videos  (1 hrs)
+
+https://www.youtube.com/watch?v=sjRhyZ9TJSo&list=PLPNlVh5W5hY-mtq3R_qxKG7h1EWCEaLfP&index=1 crop all rows above 1st full 0 row, dont include e  (1 hrs)
+https://www.youtube.com/watch?v=sjRhyZ9TJSo&list=PLPNlVh5W5hY-mtq3R_qxKG7h1EWCEaLfP&index=3 crop top and bottom, fill audio captions(1 hrs)
+
+https://www.youtube.com/watch?v=UGE19yD0Yu8&list=PL6UMd1LBpqkqp-JOD2jyHFliobqw82Smm (episode 1-36 whole, episode 37+ from 3mins in) (SKETCHY) (42 hrs)
+
+https://www.youtube.com/watch?v=V0QRfInedZ4&list=PLbFBnggbJ1rnaXljgzhGm0p_Co9kwfs3t (INPAINT BOTTOM LEFT EPISODE #) (50 hrs) (UP TO EPISODE 139)
+
+https://www.youtube.com/watch?v=3QcaDgf1EFo&list=PLoOGKqzef8e0JMaEUm6eHzMqJORobg1Bb (10 hrs) (UP TO EPISODE 25)
+
+
+
+
+THINGS TO FIX:
+crop borders
+resize to 16:9
+CV inpainting streamer
+CV inpainting audio captions
+when dataloader start, start checking frames spamham. remove frames from beginning until minecraft starts, then just add rest
