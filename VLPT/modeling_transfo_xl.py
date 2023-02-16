@@ -1116,7 +1116,9 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):
         else:
             softmax_output = None
             losses, loss = None, None
-
+        
+        if return_dict == 'VLPT':
+            return prediction_scores, loss, pred_hid, transformer_outputs.mems
 
         if not return_dict:
             if self.trainer_compatible:

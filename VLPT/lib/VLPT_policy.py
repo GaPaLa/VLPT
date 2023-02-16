@@ -159,7 +159,6 @@ class MinecraftPolicy(nn.Module):
         self.SEQ_LEN = 128
         self.LM_TIMEOUT=2# referred to also as 'D'. LM gets input from VPT and gives output to VPT every D timesteps to reduce silence token noise.
         LM_tgt_len=256 # determined by input size
-        LM_seq_len = (self.SEQ_LEN//self.LM_TIMEOUT) + 1
 
 
         assert recurrence_type == "transformer"
@@ -201,6 +200,7 @@ class MinecraftPolicy(nn.Module):
         self.LM.tie_weights() # necessary for this model)
         # @ CHANGE THESE DURING INFERENCE
         LM_mem_len=LM_tgt_len # number of previous keys to cache. eval:4608 = 256*18
+        self.LM.transformer.config.tgt_len = LM_tgt_len
         self.LM.transformer.config.mem_len = LM_mem_len 
         self.LM.transformer.config.same_len = False # eval:True
         self.LM.transformer.config.clamp_len = -1 # eval: 2000 - definitely experiment.
@@ -270,13 +270,54 @@ class MinecraftPolicy(nn.Module):
     ## NOTE OF HOW FORWARD WORKS AT END OF THIS CLASS:
     def forward(self, ob_words, ob_frames, VPT_state, context, LM_state=None, LM_active_timestep=True, LM_labels=None):
         
+
+
+
+
+
+        ############################ ugly preprocesing thats in a bad place please ignore this :)
+        if ob_words.shape[1] != self.SEQ_LEN:
+            t_seq_len = ob_words.shape[1]
+            # for speed, construct attention masks here
+            # cross atention between every D langaueg tokens and every frame
+            self.Xattn_mask_in=th.ones([max(1,t_seq_len//self.LM_TIMEOUT), t_seq_len]) # create causal mask between language tokens and frames. every frame is paired with the previous word emitted, so that at the current frame we predic the next word from the current frame (and previous frames witha ttentions) and rpevious words. For more details look at agent.py words_to_agent() # since all sequeces in the batch (and every batch assuming constant D) have the same relation in terms of time with each other, all sequences can use the same Xattn mask
+            for q in range(max(1, t_seq_len//self.LM_TIMEOUT)):
+                self.Xattn_mask_in[q, 0:q+self.LM_TIMEOUT] = 0   # @ DOUBLE CHECK THIS IS MASKING THE RIGHT WAY #@r2 - !if using each_LM_token_attends_to_all_past_frames-style x-attn (as opposed to only frames that occured during langauge token), modify this mask appropriately.
+            # cross attention between every langauge output (including repeated tokens from LM durin LM timeout) and every frame
+            self.Xattn_mask_out=th.ones([t_seq_len, t_seq_len]) # create causal mask between language tokens and frames. every frame is paired with the previous word emitted, so that at the current frame we predic the next word from the current frame (and previous frames witha ttentions) and rpevious words. For more details look at agent.py words_to_agent() # since all sequeces in the batch (and every batch assuming constant D) have the same relation in terms of time with each other, all sequences can use the same Xattn mask
+            for q in range(t_seq_len):
+                self.Xattn_mask_out[q, 0:q+1] = 0   # @ DOUBLE CHECK THIS IS MASKING THE RIGHT WAY #@r2 - !if using each_LM_token_attends_to_all_past_frames-style x-attn (as opposed to only frames that occured during langauge token), modify this mask appropriately.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         ## useful stuff for later
         first = context["first"]
-        
         ### pass input frames through CNN section
         x = self.img_preprocess(ob_frames["img"])
         x = self.img_process(x)
-
         ### pass processed frames through VPT Agent transformer layer #1. make sure only 128 tokens are rpedicted with self attention at a time, otherwise trained differently to original (?) and BIG MEM.
         x, [VPT_state[0]] = self.recurrent_layer(x, first, [VPT_state[0]], start_block=0, end_block=1)
 
@@ -307,12 +348,11 @@ class MinecraftPolicy(nn.Module):
                 LM_labels = LM_labels[:,::self.LM_TIMEOUT] # since input words are dropped according to D, labels are dropped according to D, too
 
             ### get LM raw output, word predictions and loss
-            LM_loss, LM_words, LM_losses, hidden_outputs, LM_state = self.LM(inputs_embeds=x2, mems=LM_state, labels=LM_labels, return_dict=False, output_hidden_states=True) # causal attention mask is constructed internally. No need for padding despite batch_size>1 because all sequences are always full (always same number as input frames)
-
+            LM_words, LM_loss, LM_raw_out, LM_state_out = self.LM(inputs_embeds=x2, mems=LM_state, labels=LM_labels, return_dict='VLPT', output_hidden_states=True) # causal attention mask is constructed internally. No need for padding despite batch_size>1 because all sequences are always full (always same number as input frames)
             # just get last hidden layer output
-            x2 = hidden_outputs[-1]
+            x2 = LM_raw_out
             # reshape LM_words
-            LM_words = LM_words.view(LM_words.shape[0], self.LM_seq_len, -1)
+            LM_words = LM_words.view(LM_words.shape[0], x2.shape[1], -1)
 
         else: # During inferemce when forward() is called per timestep, if LM is TIMEOUT'd at this tiemstep, output previous output from LM that VPT needs (does not include past words)
             LM_words = None # output during TIMEOUT is treated the same as with silent tokens during TIMEOUT, and discarded from LM input. dont need to predict it at all.
@@ -341,7 +381,7 @@ class MinecraftPolicy(nn.Module):
         # format action and output
         pi_latent = vf_latent = x
 
-        return (pi_latent, vf_latent), LM_words, VPT_state, LM_state, LM_loss
+        return (pi_latent, vf_latent), LM_words, VPT_state, LM_state_out, LM_loss
             
 
     def initial_state(self, batchsize):
@@ -411,9 +451,9 @@ class MinecraftPolicy(nn.Module):
 
 
 class MinecraftAgentPolicy(nn.Module):
-    def __init__(self, action_space, policy_kwargs, pi_head_kwargs, device):
+    def __init__(self, device, action_space, policy_kwargs, pi_head_kwargs, SEQ_LEN=512):
         super().__init__()
-        self.net = MinecraftPolicy(device, **policy_kwargs)
+        self.net = MinecraftPolicy(device=device, SEQ_LEN=SEQ_LEN, **policy_kwargs)
 
         self.action_space = action_space
 
@@ -534,7 +574,6 @@ class MinecraftAgentPolicy(nn.Module):
             LM_state=LM_state,
             LM_active_timestep=LM_active_timestep)
 
-        print('WORDS SHAPE, ',LM_words.shape)
 
         return pd_action, self.value_head.denormalize(vpred_action), LM_words, VPT_state_out, LM_state_out, LM_loss
 
@@ -549,6 +588,13 @@ class MinecraftAgentPolicy(nn.Module):
     ## @@@@ EDIT TO CONFORM TO LM_TIMEOUT A.K.A 'D'
     @th.no_grad()
     def act(self, obs_frame, first, VPT_state, LM_state, word_context, current_timestep, stochastic: bool=True, taken_action=None, return_pd=False):
+
+        #modify agent for single timestep inference
+        tgt_len=self.net.LM.tgt_len
+        seq_len=self.net.SEQ_LEN
+        self.net.LM.tgt_len=1
+        self.net.SEQ_LEN=1
+        
         # we can feed LM_state as none if no prevous state exists.
         LM_TIMEOUT=2
         BOS=2
@@ -576,7 +622,7 @@ class MinecraftAgentPolicy(nn.Module):
         # IF NEW FRAMES DONT CHANGE TOO MUCH ASKING THE LM AT THE NEXT TIMESTEP SHOULD BASICALLY GIEV THE SAME PREDITION
         # BUT IF DIFFERENT SHOULD ACT DIFFERENTLY, MAYBE EVEN COMPLETELY CHANIGN TOPIC - INTERRUPTing ITSELF - human-like behaviour?
         if pd_word: # word is None if LM not active at this timestep, in which case dont save a word to the word context. This means that the LM can output something at t=0, timeout for D, and then when it runs next, it correctly takes in this previous word as input
-            vpred_word = th.argmax(pd_word[0,:])
+            vpred_word = th.argmax(pd_word[0,-1]) # during inference, batch size always == 1, out
             if current_timestep > word_context.shape[1]: # do not overwrite starter word context given by user (or add to the end of it since it that introducess latency between its LM output and input)
                 word_context = th.cat([word_context, vpred_word], axis=1)
 
@@ -593,8 +639,37 @@ class MinecraftAgentPolicy(nn.Module):
             result["pd"] = tree_map(lambda x: x[:, 0], pd_action)
         ac = tree_map(lambda x: x[:, 0], ac)
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        tgt_len=self.net.LM.tgt_len
+        seq_len=self.net.SEQ_LEN
+        self.net.LM.tgt_len=1
+        self.net.SEQ_LEN=1
+
+
+
         current_timestep += 1
         return ac, VPT_state_out, result, LM_state, word_context, current_timestep    # add newly predicted word to contexxtm which should be fed back into the agent.
+
+
+
+
 
 
     # not used in VLPT - no Rl

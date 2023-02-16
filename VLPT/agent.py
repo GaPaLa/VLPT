@@ -277,6 +277,10 @@ class MineRLAgent:
             action = {k: th.from_numpy(v).to(self.device) for k, v in action.items()}
         return action
 
+    def add_inference_starter_words(self, starter_words):
+        if starter_words:
+            starter_words = self.tokenizer(starter_words)['input_ids']
+            self.word_context = th.tensor(starter_words).reshape([1,len(starter_words)], dtype=th.bool)
     # RL inference
     # can pass text to start the model off with as plaintext e.g. 'Hi guys today I'm going to build a house'
     def get_action(self, minerl_obs, starter_words=None):
@@ -290,10 +294,6 @@ class MineRLAgent:
         """
 
 
-
-        if starter_words:
-            starter_words = self.tokenizer(starter_words)['input_ids']
-            self.word_context = th.tensor(starter_words).reshape([1,len(starter_words)], dtype=th.bool)
 
 
 
@@ -311,4 +311,4 @@ class MineRLAgent:
                                                                                                             stochastic=True ####### @try deterministc?
                                                                                                             )
         minerl_action = self._agent_action_to_env(agent_action)
-        return minerl_action
+        return minerl_action, self.LM_word_context[-1]
