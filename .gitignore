@@ -1,11 +1,20 @@
 
 Data Gathering/Time_Encoding.ipynb
 *.model
-VLPT/__pycache__*
+__pycache__/*
+VLPT/__pycache__/*
 VLPT/cheeky-cornflower-setter-02e496ce4abb-20220421-092639.jsonl
-VLPT/cheeky-cornflower-setter-02e496ce4abb-20220421-092639.mp4
-VLPT/lib/__pycache__*
+VLPT/lib/__pycache__/*
+VLPT/lib/__pycache*
 *.pyc
+Data Gathering/.vscode/*
+Data Gathering/.ipynb_checkpoints/*
+Data Gathering/ffmpeg.exe
+Data Gathering/SVM2
+Data Gathering/SVM3
 Data Gathering/spamham_samples/frames/*
-Data Gathering/DATASET*
+Data Gathering/DATASET/all/*
+Data Gathering/DATASET/valid/*
+Data Gathering/DATASET/eval/*
+Data Gathering/DATASET/train/*
 *.mp4
