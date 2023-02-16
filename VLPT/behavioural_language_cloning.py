@@ -303,12 +303,7 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
     # get multiple steams of 10 minutes* video across multiple batches. continue until (to ensure lanauge model sees far back langauge)
     for batch_i, (batch_frames, batch_words, batch_actions, video_group_id) in enumerate(train_data_loader):
 
-        # zero grads
-        for param in trainable_parameters:     #https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html
-            param.grad = None
-        lr_schedule.step()
-
-        with th.cuda.amp.autocast(device_type='cuda', dtype=th.float16): #https://pytorch.org/docs/master/notes/amp_examples.html#gradient-clipping
+/amp_examples.html#gradient-clipping
             # multiple batches from the same video group will occur in a row. Dont reset memory until a different video group comes along.
             if current_video_group_id != video_group_id:
                 is_first_frame[:,...] = True
@@ -341,7 +336,13 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
 
 
             # --- optimize model
-            BLC_loss = VPT_loss + LM_loss
+        # zero grads
+        for param in trainable_parameters:     #https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html
+            param.grad = None
+
+
+        with th.cuda.amp.autocast(device_type='cuda', dtype=th.float16): #https://pytorch.org/docs/master/notes
+	    BLC_loss = VPT_loss + LM_loss
         scaler.scale(BLC_loss).backward()
         scaler.unscale_(optimizer)
         # clip LM gradient to a smaller clip value
@@ -352,7 +353,7 @@ def BLC_train(data_dir, in_model, in_weights, out_weights):
         #        th.nn.utils.clip_grad_norm_(parameter, MAX_GRAD_NORM_LM)
         scaler.step(optimizer)
         scaler.update()
-
+        lr_schedule.step()
 
 
         # # Make sure we do not try to backprop through sequence in future iterations

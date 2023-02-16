@@ -5,13 +5,14 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import os
+import numpy as np
 from os import listdir
 from os.path import isfile, join
 from PIL import Image
 
-os.chdir('/media/idmi/Music/Dissertation/VLPT/Data Gathering/')
+#os.chdir('/media/idmi/Music/Dissertation/VLPT/Data Gathering/')
 
-matplotlib.use("Qt5agg")
+#matplotlib.use("Qt5agg")
 
 print('Each image to classified into:\n1: Minecraft vanilla survival/hardcore with NO mods and NO artifacts\n2: Minecraft vanilla survival with artifacts\n3:Minecraft Creative/Modded/Server/Multiplayer')
 
@@ -22,76 +23,59 @@ print('loading filenames...')
 all_filenames = listdir('spamham_samples/frames')
 print('loaded!')
 
+
+
 # load labels file
-if isfile('spamham_samples/frames_labels.txt'):
-    labels_file = open('spamham_samples/frames_labels.txt', 'r')
-    pre_labelled = labels_file.read()
-    pre_labelled = pre_labelled.split('\n')
-    for i in range(len(pre_labelled)):
-        link = pre_labelled[i].split(',')[0]
-        pre_labelled.append(link)
-    labels_file.close()
-else:
-    labels_file = open('spamham_samples/frames_labels.txt', 'rw')
-    pre_labelled=''
-    labels_file.close()
+labels_file = open('spamham_samples/frames_labels.txt', 'r')
+already_labelled = labels_file.read()
+already_labelled = already_labelled.split('\n')
+for i in range(len(already_labelled)):
+    link = already_labelled[i].split(',')[0]
+    already_labelled.append(link)
+labels_file.close()
 
 
 
 
 
 
-#load 
 
-current_label_index=0
-frame_index = 0
-while all_filenames[frame_index].split('.')[0] in pre_labelled:
-    frame_index+=1
-current_label_index=frame_index
-image = mpimg.imread('spamham_samples/frames/'+all_filenames[current_label_index])
+# crete list of frames to check
+frames_to_label = []
+for filename in all_filenames:
+    filename = '.'.join(filename.split('.')[0:-1])
+    if not (filename in already_labelled):
+        frames_to_label.append(filename)
+print(len(frames_to_label))
 
 fig = plt.figure()
 ax = plt.gca()
+image = np.random.normal(0,1,[720,1280,3])
 window = ax.imshow(image)
+for filename in frames_to_label:
 
-while frame_index < len(all_filenames):
-
-    # display frame at current_abe;_index for labelling
+    # get next unlabelled frame
+    try:
+        image = mpimg.imread('spamham_samples/frames/'+filename+'.jpeg') # load next image
+    except:
+        continue
+    # display frame at for labelling
     window.set_data(image)
-
-    # immediately get next unlabelled frame
-    frame_index+=1
-    while all_filenames[frame_index].split('.')[0] in pre_labelled:
-        frame_index+=1
-    image = mpimg.imread('spamham_samples/frames/'+all_filenames[frame_index]) # load next image
 
     # get label for current image
     valid=False
     while not valid:
-        print(all_filenames[current_label_index].split('.')[0])
+        print(filename)
         label = input('')
         try:
             if int(label) in [1,2,3]:
-                print('ok!')
                 valid=True
             else:
                 print('not [1,2,3] try again')
         except:
                 print('NaN, try again')
+
     # save current image index and label to file
-    label=label
-    current_label_index=current_label_index
-    link = all_filenames[current_label_index].split('.')[0] # remove extension
-    line = link + ',' + str(label) + '\n'
+    line = filename + ',' + str(label) + '\n'
     with open('spamham_samples/frames_labels.txt', 'a') as labels_file:
         labels_file.write(line)
-    
-    # update labelling target to next unlabelled frame
-    current_label_index = frame_index
-
-
-
-
-
-
-

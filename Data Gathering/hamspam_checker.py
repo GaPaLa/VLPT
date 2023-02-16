@@ -1,6 +1,12 @@
+#if False:
+#    !pip install matplotlib
+#    !pip install PyQt6
+#    !pip install PySide6
+
 
 # create GUI window to show an image
-
+import PySide6
+import PyQt6
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
@@ -10,9 +16,10 @@ from os.path import isfile, join
 from PIL import Image
 import numpy as np
 
-os.chdir('/media/idmi/Music/Dissertation/VLPT/Data Gathering/')
+#os.chdir('/media/idmi/Music/Dissertation/VLPT/Data Gathering/')
 
-matplotlib.use("Qt5agg")
+
+#matplotlib.use("Qt5agg")
 
 print('Each image to classified into:\n1: Minecraft vanilla survival/hardcore with NO mods and NO artifacts\n2: Minecraft vanilla survival with artifacts\n3:Minecraft Creative/Modded/Server/Multiplayer')
 
@@ -54,7 +61,7 @@ while frame_index < len(pre_labelled):
     # get reponse to current image
     print(image_filename)
     label = input('')
-    if label == '1':
+    if label == 'q':
         frame_index -= 3 # 30 if back gets stuck
 
     # save current image index and label to file

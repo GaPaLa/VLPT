@@ -106,7 +106,7 @@ def resize_image(img, target_resolution):
 
 class MineRLAgent:
     def __init__(self, env=None, device=None, policy_kwargs=None, pi_head_kwargs=None):
-        if env:
+        if env and not env==-999:
             validate_env(env)
 
         ## args

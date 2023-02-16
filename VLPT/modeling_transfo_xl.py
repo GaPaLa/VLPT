@@ -1106,17 +1106,17 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):
         # labels should be fed NOT as HF standard. if input sequence is [a,b,c] and the next token is d, labels = [b,c,d]
         # required modified utilities
         prediction_scores = self.crit(pred_hid)        # WARNING: SAMPLING ADAPTIVE SOFTMAX TWICE: SLOW    # softmax_output.view(bsz, tgt_len, -1) # always give prediction scores. This allows for us to retreive the predicted tokens and the loss
-        if labels:
-            softmax_output = self.crit(pred_hid, labels)   # WARNING: SAMPLING ADAPTIVE SOFTMAX TWICE: SLOW
-        else:
-            softmax_output = None
-
+        
+        
         if labels is not None:
+            softmax_output = self.crit(pred_hid, labels)   # WARNING: SAMPLING ADAPTIVE SOFTMAX TWICE: SLOW
             losses = softmax_output.view(bsz, tgt_len)
             # Avoids from incorporating padding (-100) tokens into loss value
             loss = losses[losses != 0].mean()
         else:
+            softmax_output = None
             losses, loss = None, None
+
 
         if not return_dict:
             if self.trainer_compatible:
