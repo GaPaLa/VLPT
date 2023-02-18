@@ -134,8 +134,11 @@ class MineRLAgent:
         # hidden state management
         self.VPT_hidden_state = self.policy.initial_state(1)
         self.LM_hidden_state = None
-        self.LM_word_context = th.full([1,1],self.BOS, dtype=th.bool)
-        self.current_timestep=0
+        self.LM_word_context = th.full([1,1],self.BOS, dtype=th.long)
+        self.current_timestep = 0
+        self.previous_LM_output = None
+        self.LM_TIMEOUT=2
+        self.LM_starter_words = th.full([0,0],self.BOS, dtype=th.long)
 
     def load_weights(self, path):
         """Load model weights from a path, and reset hidden state"""
@@ -148,13 +151,13 @@ class MineRLAgent:
         self.LM_word_context = th.full([1,1],self.BOS, dtype=th.bool)
         self.current_timestep=0
 
-    def _env_obs_to_agent(self, minerl_obs):
+    def _env_obs_to_agent(self, obs_frames):
         """
         Turn observation from MineRL environment into model's observation
 
         Returns torch tensors.
         """
-        agent_input = resize_image(minerl_obs["pov"], AGENT_RESOLUTION)[None]
+        agent_input = resize_image(obs_frames["pov"], AGENT_RESOLUTION)[None]
         agent_input = {"img": th.from_numpy(agent_input).to(self.device)}
         
         return agent_input
@@ -167,7 +170,7 @@ class MineRLAgent:
         video_obs['ms'] = ms
         return video_obs
 
-    def _words_to_agent(self, words, word_ms, ob_frames):
+    def _words_to_agent(self, words, word_ms, obs_frames):
         ## take in list of list of every word in episode, and list of list of when those words occur in time (in ms). 
 
         ## PAIRS WORDS WITH FRAMES AND CREATES EQUAL SHAPED WORD TENSOR TO FRAM TENSOR.
@@ -179,7 +182,7 @@ class MineRLAgent:
 
         LM_TIMEOUT = 1
         SILENCE_TOKEN_ID = 2 # 2 in transfo_xl is ','. performs second best to ' ', but transfo_xl has no ' ' token since it is word-level tokenizer. #1437 in OPT is space token. best performing in OPT accoding to rough experiments on gutenber performance with different random tokns inserted at the same positions. # IF TRANSCRIBER GIVE NO COMMA, USE COMMA. comma=6. newline character=50118. single space=1437 luckily, in this tokenizer, stray spaces are classified as separate characters isntead of extensions of real word parts, so it is an intuitive 1:1 translation of extra spaces from human langauge to model. Hopefully it is therefore much easier to learn! # TEST: INSERT TOKENS AS NOISE TO NORMAL LANGUAGE INPUT AND SEE WHICH IS LEAST DESTRUCTIVE TO PERFORMANCE
-        num_frames = ob_frames['img'].shape[1]
+        num_frames = obs_frames['img'].shape[1]
 
         ## convert word input to tensor
         batch_size = len(words) # words is a list of strings, each string is the language input over a section of video. The words must line up with the video frames being fed into the model
@@ -210,8 +213,8 @@ class MineRLAgent:
             for t in language_tokens.shape[1]: #### D MUST BE DIVISIBLE BY NUMBER OF FRAMES
                 
                 #check for langauge tokens that occur during the 50ms span of each frame
-                word_index = th.where(  (ob_words['ms'][b] >= ob_frames['ms'][b,t*LM_TIMEOUT] - 50*LM_TIMEOUT)
-                                       &(ob_words['ms'][b] <  ob_frames['ms'][b,t*LM_TIMEOUT]))
+                word_index = th.where(  (ob_words['ms'][b] >= obs_frames['ms'][b,t*LM_TIMEOUT] - 50*LM_TIMEOUT)
+                                       &(ob_words['ms'][b] <  obs_frames['ms'][b,t*LM_TIMEOUT]))
                 
                 # work out token_ids of occured words and append to buffer of tokens to be assigned to a frame
                 for i in range([0]*word_index[0].shape[0]):
@@ -277,13 +280,15 @@ class MineRLAgent:
             action = {k: th.from_numpy(v).to(self.device) for k, v in action.items()}
         return action
 
+
     def add_inference_starter_words(self, starter_words):
         if starter_words:
             starter_words = self.tokenizer(starter_words)['input_ids']
-            self.word_context = th.tensor(starter_words).reshape([1,len(starter_words)], dtype=th.bool)
+            self.LM_starter_words = th.tensor(starter_words, dtype=th.long).reshape([1,len(starter_words)])
+
     # RL inference
     # can pass text to start the model off with as plaintext e.g. 'Hi guys today I'm going to build a house'
-    def get_action(self, minerl_obs, starter_words=None):
+    def get_action(self, obs_frames):
 
         # allow for passing starter word context, but the model generates its own tokens and feeds them back into the context as it runs
         """
@@ -292,23 +297,44 @@ class MineRLAgent:
         Agent's hidden state is tracked internally (within this class). To reset it,
         call `reset()`.
         """
+        if self.current_timestep%self.LM_TIMEOUT==0:
+            #use starter words until done
+            if self.current_timestep < self.LM_starter_words.shape[1]*self.LM_TIMEOUT:
+                current_word_idx = self.current_timestep//self.LM_TIMEOUT
+                current_word = self.LM_starter_words[0,self.current_timestep//self.LM_TIMEOUT].view([1,1])
+                print('CONTEXT:', self.tokenizer.decode(current_word.reshape([1]) ))
+            # use last word outputted from LM as input to LM
+            else:
+                current_word = self.LM_word_context[0,-1].view([1,1])
+                print('AUTOREG: ', self.tokenizer.decode(current_word.reshape([1]) ))
+                
+        # placeholder if LM inactive timestep
+        else:
+            current_word = th.full([1,1], self.BOS, dtype=th.long)
 
+        obs_frames = self._env_obs_to_agent(obs_frames)
 
-
-
-
-        current_frame = self._env_obs_to_agent(minerl_obs)
         # The "first" argument could be used to reset tell episode
         # boundaries, but we are only using this for predicting (for now),
         # so we do not hassle with it yet.
-        agent_action, self.VPT_hidden_state, _, self.LM_hidden_state, self.LM_word_context = self.policy.act(
-                                                                                                            current_frame, 
-                                                                                                            self._dummy_first, 
-                                                                                                            self.VPT_hidden_state,
-                                                                                                            self.LM_hidden_state,
-                                                                                                            self.LM_word_context,
-                                                                                                            self.current_timestep,
-                                                                                                            stochastic=True ####### @try deterministc?
+        agent_action, agent_action_pd, self.VPT_hidden_state, self.LM_hidden_state, self.previous_LM_output, vpred_word = self.policy.act(
+                                                                                                            obs_frames=obs_frames,
+                                                                                                            current_timestep=self.current_timestep,
+                                                                                                            first=self._dummy_first, 
+                                                                                                            VPT_state=self.VPT_hidden_state,
+                                                                                                            LM_state=self.LM_hidden_state,
+                                                                                                            obs_word=current_word,
+                                                                                                            stochastic=True, ####### @try deterministc?
+                                                                                                            previous_LM_output=self.previous_LM_output,
                                                                                                             )
         minerl_action = self._agent_action_to_env(agent_action)
-        return minerl_action, self.LM_word_context[-1]
+        # if active LM timestep and we are past the starter word context, append LM output back into word context
+        if self.current_timestep%self.LM_TIMEOUT==0:
+            if (self.current_timestep+(self.LM_TIMEOUT) >= (self.LM_starter_words.shape[1]*self.LM_TIMEOUT)-self.LM_TIMEOUT):
+                self.LM_word_context = th.cat([self.LM_word_context, vpred_word], dim=1)
+
+        if self.current_timestep%self.LM_TIMEOUT==0:
+            print(' --- PREDICTED WORD: ',self.tokenizer.decode(vpred_word.reshape([1])))
+
+        self.current_timestep += 1
+        return minerl_action, self.LM_word_context[0,-1]
