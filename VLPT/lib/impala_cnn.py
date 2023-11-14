@@ -2,6 +2,7 @@ import math
 from copy import deepcopy
 from typing import Dict, List, Optional
 
+from torch import float32
 from torch import nn
 from torch.nn import functional as F
 
@@ -23,6 +24,7 @@ class CnnBasicBlock(nn.Module):
         init_scale: float = 1,
         log_scope="",
         init_norm_kwargs: Dict = {},
+        dtype=float32,
         **kwargs,
     ):
         super().__init__()
@@ -34,6 +36,7 @@ class CnnBasicBlock(nn.Module):
             kernel_size=3,
             padding=1,
             init_scale=s,
+            dtype=dtype,
             log_scope=f"{log_scope}/conv0",
             **init_norm_kwargs,
         )
@@ -43,6 +46,7 @@ class CnnBasicBlock(nn.Module):
             kernel_size=3,
             padding=1,
             init_scale=s,
+            dtype=dtype,
             log_scope=f"{log_scope}/conv1",
             **init_norm_kwargs,
         )
@@ -77,6 +81,7 @@ class CnnDownStack(nn.Module):
         log_scope: str = "",
         init_norm_kwargs: Dict = {},
         first_conv_norm=False,
+        dtype=float32,
         **kwargs,
     ):
         super().__init__()
@@ -93,11 +98,12 @@ class CnnDownStack(nn.Module):
             kernel_size=3,
             padding=1,
             log_scope=f"{log_scope}/firstconv",
+            dtype=dtype,
             **first_conv_init_kwargs,
         )
         self.post_pool_groups = post_pool_groups
         if post_pool_groups is not None:
-            self.n = nn.GroupNorm(post_pool_groups, outchan)
+            self.n = nn.GroupNorm(post_pool_groups, outchan, dtype=dtype)
         self.blocks = nn.ModuleList(
             [
                 CnnBasicBlock(
@@ -105,6 +111,7 @@ class CnnDownStack(nn.Module):
                     init_scale=init_scale / math.sqrt(nblock),
                     log_scope=f"{log_scope}/block{i}",
                     init_norm_kwargs=init_norm_kwargs,
+                    dtype=dtype,
                     **kwargs,
                 )
                 for i in range(nblock)
@@ -112,6 +119,7 @@ class CnnDownStack(nn.Module):
         )
 
     def forward(self, x):
+
         x = self.firstconv(x)
         if self.pool:
             x = F.max_pool2d(x, kernel_size=3, stride=2, padding=1)
@@ -154,6 +162,7 @@ class ImpalaCNN(nn.Module):
         init_norm_kwargs: Dict = {},
         dense_init_norm_kwargs: Dict = {},
         first_conv_norm=False,
+        dtype=float32,
         **kwargs,
     ):
         super().__init__()
@@ -169,6 +178,7 @@ class ImpalaCNN(nn.Module):
                 log_scope=f"downstack{i}",
                 init_norm_kwargs=init_norm_kwargs,
                 first_conv_norm=first_conv_norm if i == 0 else True,
+                dtype=dtype,
                 **kwargs,
             )
             self.stacks.append(stack)
@@ -180,16 +190,20 @@ class ImpalaCNN(nn.Module):
             layer_type="linear",
             log_scope="imapala_final_dense",
             init_scale=1.4,
+            dtype=dtype,
             **dense_init_norm_kwargs,
         )
         self.outsize = outsize
+        self.dropout=nn.Dropout(p=0.2, inplace=False)
 
     def forward(self, x):
+
         b, t = x.shape[:-3]
         x = x.reshape(b * t, *x.shape[-3:])
         x = misc.transpose(x, "bhwc", "bchw")
         x = tu.sequential(self.stacks, x, diag_name=self.name)
         x = x.reshape(b, t, *x.shape[1:])
         x = tu.flatten_image(x)
+        x = self.dropout(x)
         x = self.dense(x)
         return x

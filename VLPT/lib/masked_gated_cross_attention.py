@@ -25,8 +25,9 @@ class MaskedGatedCrossAttention(th.nn.Module):
         ffw_dim,
         batch_first=True,
         device=None,
-        dtype=None
+        dtype=th.float32
         ):
+
         super().__init__()
 
         self.attention = th.nn.MultiheadAttention(
@@ -40,12 +41,13 @@ class MaskedGatedCrossAttention(th.nn.Module):
             batch_first=batch_first,
             device=device,
             dtype=dtype)
-        
-        self.ffw = MLP(insize=embed_dim, nhidlayer=1, outsize=embed_dim, hidsize=ffw_dim, hidactiv=sqrelu, dtype=th.float32) #, dtype=th.float32)
-        self.num_heads = num_heads
-        self.alpha_xattn = th.nn.Parameter(th.tensor(0.)) # xattn gating parameter – init at 0.
-        self.alpha_dense  = th.nn.Parameter(th.tensor(0.)) # ffw gating parameter – init at 0.
 
+        self.dtype=dtype
+        self.ffw = MLP(insize=embed_dim, nhidlayer=1, outsize=embed_dim, hidsize=ffw_dim, hidactiv=sqrelu, dtype=dtype)
+        self.num_heads = num_heads
+        self.alpha_xattn = th.nn.Parameter(th.tensor(0.,dtype=dtype)) # xattn gating parameter – init at 0.
+        self.alpha_dense  = th.nn.Parameter(th.tensor(0.,dtype=dtype)) # ffw gating parameter – init at 0.
+        self.dropout = th.nn.Dropout(p=0.2, inplace=False)
         
     def forward(
         self,
@@ -53,24 +55,22 @@ class MaskedGatedCrossAttention(th.nn.Module):
         y, # input -  QUERY - input shape of this is output shape of cross-attention
         attn_mask = None
         ):
-        att = attn_mask
-        
-        #if att != None:
-        #    att = attn_mask.shape
-        #print("xattn fwd: x input, y input, mask:", x.shape, y.shape, att, "isNaN x, y:",th.isnan(x).any(),th.isnan(y).any(), end="")
 
         """Applies a GATED XATTN-DENSE layer."""
 
         # 1. Gated Cross Attention
-        cross_attention = self.attention(query=y, key=x,value=x, attn_mask=attn_mask)[0]
-        y += cross_attention * th.tanh(self.alpha_xattn)
+        cross_attention = self.attention(query=y, key=x, value=x, attn_mask=attn_mask)[0]
+        cross_attention = self.dropout(cross_attention)
+        c = y + (cross_attention * th.tanh(self.alpha_xattn))
+
         #print("GXA output isNaN:",th.isnan(cross_attention).any())
 
         # 2. Gated Feed Forward (dense) Layer
-        ffw = self.ffw(y)
-        y += ffw * th.tanh(self.alpha_dense)
+        ffw = self.ffw(c)
+        ffw = self.dropout(ffw)
+        o = c + (ffw * th.tanh(self.alpha_dense))
 
-        return y # output 
+        return o # output 
 
 
 

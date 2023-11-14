@@ -21,7 +21,7 @@ def get_band_diagonal_mask(t: int, T: int, maxlen: int, batchsize: int, device: 
           1 1 0 |
           1 1 1 |
         t = 3, T = 6, maxlen = 3
-        t 0 1 1 1 0 0 |  mask out T > t
+        t 0 1 1 1 0 0 |  mask out T > t #dropout
           0 0 1 1 1 0 |
           0 0 0 1 1 1 |
 
@@ -128,6 +128,7 @@ class MaskedAttention(nn.Module):
         norm="none",
         log_scope="sa",
         use_muP_factor=False,
+        dtype=th.float32
     ):
         super().__init__()
 
@@ -138,7 +139,7 @@ class MaskedAttention(nn.Module):
         if mask == "none":
             mask = None
 
-        self.orc_attn = xf.All2All(heads, self.maxlen, mask=mask is not None)
+        self.orc_attn = xf.All2All(heads, self.maxlen, mask=mask is not None, dtype=dtype)
         self.orc_block = xf.SelfAttentionLayer(
             input_size,
             self.orc_attn,
@@ -148,6 +149,7 @@ class MaskedAttention(nn.Module):
             norm=norm,
             log_scope=log_scope,
             use_muP_factor=use_muP_factor,
+            dtype=dtype
         )
 
     def initial_state(self, batchsize: int, device=None):

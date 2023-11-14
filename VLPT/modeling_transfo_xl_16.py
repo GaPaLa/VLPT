@@ -264,8 +264,8 @@ class RelPartialLearnableMultiHeadAttn(nn.Module):
         self.pre_lnorm = pre_lnorm
 
         if r_r_bias is None or r_w_bias is None:  # Biases are not shared
-            self.r_r_bias = nn.Parameter(torch.FloatTensor(self.n_head, self.d_head))
-            self.r_w_bias = nn.Parameter(torch.FloatTensor(self.n_head, self.d_head))
+            self.r_r_bias = nn.Parameter(torch.BFloat16Tensor(self.n_head, self.d_head))
+            self.r_w_bias = nn.Parameter(torch.BFloat16Tensor(self.n_head, self.d_head))
         else:
             self.r_r_bias = r_r_bias
             self.r_w_bias = r_w_bias
@@ -333,10 +333,10 @@ class RelPartialLearnableMultiHeadAttn(nn.Module):
             attn_mask = attn_mask == 1  # Switch to bool
             if attn_mask.dim() == 2:
                 attn_score = (
-                    attn_score.float().masked_fill(attn_mask[None, :, :, None], mask_value).type_as(attn_score)
+                    attn_score.bfloat16().masked_fill(attn_mask[None, :, :, None], mask_value).type_as(attn_score)
                 )
             elif attn_mask.dim() == 3:
-                attn_score = attn_score.float().masked_fill(attn_mask[:, :, :, None], mask_value).type_as(attn_score)
+                attn_score = attn_score.bfloat16().masked_fill(attn_mask[:, :, :, None], mask_value).type_as(attn_score)
 
         # [qlen x klen x bsz x n_head]
         attn_prob = nn.functional.softmax(attn_score, dim=1)
@@ -417,13 +417,13 @@ class AdaptiveEmbedding(nn.Module):
         if div_val == 1:
             self.emb_layers.append(nn.Embedding(n_token, d_embed, sparse=sample_softmax > 0))
             if d_proj != d_embed:
-                self.emb_projs.append(nn.Parameter(torch.FloatTensor(d_proj, d_embed)))
+                self.emb_projs.append(nn.Parameter(torch.BFloat16Tensor(d_proj, d_embed)))
         else:
             for i in range(len(self.cutoffs)):
                 l_idx, r_idx = self.cutoff_ends[i], self.cutoff_ends[i + 1]
                 d_emb_i = d_embed // (div_val**i)
                 self.emb_layers.append(nn.Embedding(r_idx - l_idx, d_emb_i))
-                self.emb_projs.append(nn.Parameter(torch.FloatTensor(d_proj, d_emb_i)))
+                self.emb_projs.append(nn.Parameter(torch.BFloat16Tensor(d_proj, d_emb_i)))
 
     def forward(self, inp):
         if self.div_val == 1:
@@ -622,10 +622,10 @@ class TransfoXLModelOutput(ModelOutput):
             heads.
     """
 
-    last_hidden_state: torch.FloatTensor
-    mems: List[torch.FloatTensor] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    last_hidden_state: torch.BFloat16Tensor
+    mems: List[torch.BFloat16Tensor] = None
+    hidden_states: Optional[Tuple[torch.BFloat16Tensor]] = None
+    attentions: Optional[Tuple[torch.BFloat16Tensor]] = None
 
 
 @dataclass
@@ -655,11 +655,11 @@ class TransfoXLSequenceClassifierOutputWithPast(ModelOutput):
             heads.
     """
 
-    loss: Optional[torch.FloatTensor] = None
-    logits: torch.FloatTensor = None
-    mems: List[torch.FloatTensor] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    loss: Optional[torch.BFloat16Tensor] = None
+    logits: torch.BFloat16Tensor = None
+    mems: List[torch.BFloat16Tensor] = None
+    hidden_states: Optional[Tuple[torch.BFloat16Tensor]] = None
+    attentions: Optional[Tuple[torch.BFloat16Tensor]] = None
 
 
 @dataclass
@@ -691,12 +691,12 @@ class TransfoXLLMHeadModelOutput(ModelOutput):
             Reduced language modeling loss.
     """
 
-    losses: Optional[torch.FloatTensor] = None
-    prediction_scores: torch.FloatTensor = None
-    mems: List[torch.FloatTensor] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[torch.FloatTensor]] = None
-    loss: Optional[torch.FloatTensor] = None
+    losses: Optional[torch.BFloat16Tensor] = None
+    prediction_scores: torch.BFloat16Tensor = None
+    mems: List[torch.BFloat16Tensor] = None
+    hidden_states: Optional[Tuple[torch.BFloat16Tensor]] = None
+    attentions: Optional[Tuple[torch.BFloat16Tensor]] = None
+    loss: Optional[torch.BFloat16Tensor] = None
 
     @property
     def logits(self):
@@ -784,8 +784,8 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
         self.attn_type = config.attn_type
 
         if not config.untie_r:
-            self.r_w_bias = nn.Parameter(torch.FloatTensor(self.n_head, self.d_head))
-            self.r_r_bias = nn.Parameter(torch.FloatTensor(self.n_head, self.d_head))
+            self.r_w_bias = nn.Parameter(torch.BFloat16Tensor(self.n_head, self.d_head))
+            self.r_r_bias = nn.Parameter(torch.BFloat16Tensor(self.n_head, self.d_head))
 
         self.layers = nn.ModuleList()
         if config.attn_type == 0:  # the default attention
@@ -875,9 +875,9 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
-        mems: Optional[List[torch.FloatTensor]] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        mems: Optional[List[torch.BFloat16Tensor]] = None,
+        head_mask: Optional[torch.BFloat16Tensor] = None,
+        inputs_embeds: Optional[torch.BFloat16Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -1068,9 +1068,9 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
-        mems: Optional[List[torch.FloatTensor]] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        mems: Optional[List[torch.BFloat16Tensor]] = None,
+        head_mask: Optional[torch.BFloat16Tensor] = None,
+        inputs_embeds: Optional[torch.BFloat16Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -1210,9 +1210,9 @@ class TransfoXLForSequenceClassification(TransfoXLPreTrainedModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
-        mems: Optional[List[torch.FloatTensor]] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        mems: Optional[List[torch.BFloat16Tensor]] = None,
+        head_mask: Optional[torch.BFloat16Tensor] = None,
+        inputs_embeds: Optional[torch.BFloat16Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,

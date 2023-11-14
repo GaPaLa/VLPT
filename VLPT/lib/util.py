@@ -8,6 +8,8 @@ import lib.torch_util as tu
 from lib.masked_attention import MaskedAttention
 from lib.minecraft_util import store_args
 from lib.tree_util import tree_map
+#
+from torch import float32
 
 
 def get_module_log_keys_recursive(m: nn.Module):
@@ -52,6 +54,7 @@ class FanInInitReLULayer(nn.Module):
         layer_norm: bool = False,
         use_activation=True,
         log_scope: Optional[str] = None,
+        dtype=float32,
         **layer_kwargs,
     ):
         super().__init__()
@@ -59,14 +62,14 @@ class FanInInitReLULayer(nn.Module):
         # Normalization
         self.norm = None
         if batch_norm:
-            self.norm = nn.BatchNorm2d(inchan, **batch_norm_kwargs)
+            self.norm = nn.BatchNorm2d(inchan, dtype=dtype, **batch_norm_kwargs)
         elif group_norm_groups is not None:
-            self.norm = nn.GroupNorm(group_norm_groups, inchan)
+            self.norm = nn.GroupNorm(group_norm_groups, inchan, dtype=dtype)
         elif layer_norm:
-            self.norm = nn.LayerNorm(inchan)
+            self.norm = nn.LayerNorm(inchan, dtype=dtype)
 
         layer = dict(conv=nn.Conv2d, conv3d=nn.Conv3d, linear=nn.Linear)[layer_type]
-        self.layer = layer(inchan, outchan, bias=self.norm is None, *layer_args, **layer_kwargs)
+        self.layer = layer(inchan, outchan, bias=self.norm is None, dtype=dtype, *layer_args, **layer_kwargs)
 
         # Init Weights (Fan-In)
         self.layer.weight.data *= init_scale / self.layer.weight.norm(
@@ -157,6 +160,7 @@ class ResidualRecurrentBlock(nn.Module):
         attention_mask_style="clipped_causal",
         log_scope="resblock",
         block_number=0,
+        dtype=float32
     ):
         super().__init__()
         self.log_scope = f"{log_scope}{block_number}"
@@ -170,6 +174,7 @@ class ResidualRecurrentBlock(nn.Module):
             init_scale=1,
             layer_type="linear",
             layer_norm=True,
+            dtype=dtype,
             log_scope=self.log_scope + "/ptwise_mlp0",
         )
         self.mlp1 = FanInInitReLULayer(
@@ -178,10 +183,11 @@ class ResidualRecurrentBlock(nn.Module):
             init_scale=s,
             layer_type="linear",
             use_activation=pointwise_use_activation,
+            dtype=dtype,
             log_scope=self.log_scope + "/ptwise_mlp1",
         )
 
-        self.pre_r_ln = nn.LayerNorm(hidsize)
+        self.pre_r_ln = nn.LayerNorm(hidsize, dtype=dtype)
         
         self.r = MaskedAttention(
             input_size=hidsize,
@@ -193,16 +199,18 @@ class ResidualRecurrentBlock(nn.Module):
             log_scope=log_scope + "/sa",
             use_muP_factor=True,
             mask=attention_mask_style,
+            dtype=dtype
         )
+        
+        self.dropout=th.nn.Dropout(p=0.2, inplace=False)
 
 
     # define forward for a single transformer block
     def forward(self, x, first, state):
         
-        residual = x
-        
         x = self.pre_r_ln(x)
 
+		# Attention
         x, state_out = recurrent_forward(
             self.r,
             x,
@@ -210,13 +218,16 @@ class ResidualRecurrentBlock(nn.Module):
             state,
             reverse_lstm=False,
         )
-
-        if self.use_pointwise_layer:
-            # Residual MLP
-            residual = x
-            x = self.mlp1(self.mlp0(x))
-            if self.is_residual:
-                x = x + residual
+        #x = self.dropout(x)   #### residual is handled internally instide MaskeedAttentino->xf.py->selfattention(). so dropout is applied inside here, to the output of attention before the residual is added back to the outpu
+        
+        
+        # MLP
+        residual = x
+        x = self.mlp1(self.mlp0(x))
+        x = self.dropout(x)
+        
+        #residual
+        x = x + residual
 
         return x, state_out
 

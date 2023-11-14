@@ -45,9 +45,9 @@ def attention(
     if isinstance(mask, th.Tensor):
         bias = (~mask).float() * -1e9
     elif mask:
-        bias = get_attn_bias_cached(Q_bte.shape[1], K_bTe.shape[1], maxlen=maxlen, device=Q_bte.device, dtype=th.float32)
+        bias = get_attn_bias_cached(Q_bte.shape[1], K_bTe.shape[1], maxlen=maxlen, device=Q_bte.device, dtype=dtype)
     else:
-        bias = Q_bte.new_zeros((), dtype=th.float32)
+        bias = Q_bte.new_zeros((), dtype=dtype)
     if extra_btT is not None:
         bias = bias + extra_btT
     # Equivalent to bias + (1 / math.sqrt(e)) * th.einsum("bte,bpe->btp", Q_bte, K_bte)
@@ -82,7 +82,7 @@ class Attn:
         axis.
     """
 
-    def __init__(self, mask, maxlen):
+    def __init__(self, mask, maxlen, dtype=th.float16):
         self.mask = mask
         self.maxlen = maxlen
 
@@ -104,7 +104,7 @@ def split_heads(x_bte, h):
 
 
 class All2All(Attn):
-    def __init__(self, nhead, maxlen, mask=True, head_dim=None):
+    def __init__(self, nhead, maxlen, mask=True, head_dim=None, dtype=th.float16):
         super().__init__(mask=mask, maxlen=maxlen)
         assert (nhead is None) != (head_dim is None), "exactly one of nhead and head_dim must be specified"
         self.h = nhead
@@ -236,7 +236,7 @@ class AttentionLayerBase(nn.Module):
         c_size,
         qk_size,
         v_size,
-        dtype,
+        dtype=th.float16,
         relattn=False,
         seqlens=None,
         separate=False,
@@ -298,7 +298,7 @@ class SelfAttentionLayer(AttentionLayerBase):
         x_size,
         attn,
         scale,
-        dtype="float32",
+        dtype="float16",
         norm="layer",
         cache_keep_len=None,
         relattn=False,
@@ -330,6 +330,7 @@ class SelfAttentionLayer(AttentionLayerBase):
         self.cache_keep_len = cache_keep_len
         self.log_scope = log_scope
         self.use_muP_factor = use_muP_factor
+        self.dropout = th.nn.Dropout(p=0.2, inplace=False)
 
     def residual(self, X_bte, state):
         X_bte = self.ln_x(X_bte)
@@ -357,6 +358,7 @@ class SelfAttentionLayer(AttentionLayerBase):
 
     def forward(self, X_bte, state):
         R_bte, state = self.residual(X_bte, state)
+        R_bte = self.dropout(R_bte)
         return X_bte + R_bte, state
 
     def stateless_forward(self, X_bte):
@@ -387,7 +389,7 @@ class SelfAttentionLayer(AttentionLayerBase):
         instate_K, instate_V = state
         outstate_K, K_bte = append(instate_K, K_bte)
         outstate_V, V_bte = append(instate_V, V_bte)
-        assert outstate_K.shape[-2] <= self.cache_keep_len
+        assert outstate_K.shape[-2] <= self.cache_keep_len #dropout
         return (outstate_K, outstate_V), K_bte, V_bte
 
     def initial_state(self, batchsize, initial_T=0):
@@ -421,6 +423,7 @@ class PointwiseLayer(nn.Module):
         )
         self.mlp.layers[0].weight.data *= MLP0_SCALE * s
         self.mlp.layers[1].weight.data *= MLP1_SCALE * s
+        self.dropout=nn.Dropout(0.2, inplace=False)
 
     def residual(self, x):
         x = self.ln(x)
@@ -428,7 +431,7 @@ class PointwiseLayer(nn.Module):
         return x
 
     def forward(self, x):
-        return x + self.residual(x)
+        return x + self.dropout(self.residual(x))
 
 
 def _is_separate(sep, name):

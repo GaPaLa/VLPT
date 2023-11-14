@@ -133,7 +133,7 @@ class MinecraftPolicy(nn.Module):
         impala_chans=(16, 32, 32),
         obs_processing_width=256,
         hidsize=512,
-        single_output=False,  # True if we don't need separate outputs for action/value outputs
+        single_output=False,  # True if we don't need separate outputs for action/value outputs 
         img_shape=None,
         scale_input_img=True,
         only_img_input=False,
@@ -303,8 +303,6 @@ class InverseActionNet(MinecraftPolicy):
         first = context["first"]
         x = self.img_preprocess(ob["img"])
 
-        print("in forward. x shape:",x.shape)
-
         # Conv3D Prior to Impala
         if self.conv3d_layer is not None:
             x = self._conv3d_forward(x)
@@ -312,7 +310,6 @@ class InverseActionNet(MinecraftPolicy):
         # Impala Stack
         x = self.img_process(x)
 
-        print("in forward. x shape:",x.shape)
         if self.recurrent_layer is not None:
             x, state_out = self.recurrent_layer(x, first, state_in)
 
@@ -399,7 +396,7 @@ class InverseActionPolicy(nn.Module):
         (pd, _, _), state_out = self(obs=obs, **kwargs)
 
         ac = self.pi_head.sample(pd, deterministic=deterministic)
-        print("shape of IDM predict output:",ac)
+        #print("shape of IDM predict output:",ac)
         log_prob = self.pi_head.logprob(ac, pd)
 
         assert not th.isnan(log_prob).any()

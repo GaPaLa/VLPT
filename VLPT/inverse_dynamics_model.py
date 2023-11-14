@@ -42,10 +42,16 @@ class IDMAgent:
         self.hidden_state = self.policy.initial_state(1)
         self._dummy_first = th.from_numpy(np.array((False,))).to(device)
 
-    def load_weights(self, path):
+    def load_weights(self, path, quant=False):
         """Load model weights from a path, and reset hidden state"""
         self.policy.load_state_dict(th.load(path, map_location=self.device), strict=False)
         self.reset()
+
+        if quant: #https://pytorch.org/docs/stable/quantization.html
+            self.policy.net = th.quantization.quantize_dynamic( 
+                                                                self.policy.net.to('cpu'),  # the original model
+                                                                {th.nn.Linear},  # a set of layers to dynamically quantize
+                                                                dtype=th.float16).to('cuda')
 
     def reset(self):
         """Reset agent to initial state (i.e., reset hidden state)"""
@@ -78,14 +84,15 @@ class IDMAgent:
             "camera": agent_action["camera"].cpu().numpy()
         }
         minerl_action = self.action_mapper.to_factored(action)
-        minerl_action_transformed = self.action_transformer.policy2env(minerl_action)
-        return minerl_action_transformed
+        #minerl_action_transformed = self.action_transformer.policy2env(minerl_action)
+        #return minerl_action_transformed
+        return minerl_action
 
     def predict_actions(self, video_frames, raw_frames=False):
         """
         Predict actions for a sequence of frames.
 
-        `video_frames` should be of shape (N, H, W, C).
+        `video_frames` should be of shape (N, H, W, C). -------- (B, T, H, W, C).
         Returns MineRL action dict, where each action head
         has shape (N, ...).
 
@@ -102,15 +109,15 @@ class IDMAgent:
         hidden_state = self.policy.initial_state(agent_input['img'].shape[0])       # always use 
 
         predicted_actions, hidden_state, _ = self.policy.predict(
-                                                                    agent_input,
-                                                                    first=dummy_first, 
-                                                                    state_in=hidden_state,
-                                                                    deterministic=True
-        )
+                                                        agent_input,
+                                                        first=dummy_first,
+                                                        state_in=hidden_state,
+                                                        deterministic=True)
 
-        print('hidden state:',hidden_state)
+        #print('hidden state:',hidden_state)
         
-        # return raw agent action for easier transport of data to training regime
-        #predicted_minerl_action = self._agent_action_to_env(predicted_actions)
-        #return predicted_minerl_action
-        return predicted_actions
+        # return raw agent action for easier transport of data to training regime observation
+        predicted_minerl_action = self._agent_action_to_env(predicted_actions)
+        return predicted_minerl_action
+        #return predicted_actions
+

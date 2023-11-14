@@ -74,6 +74,8 @@ def NormedLinear(*args, scale=1.0, dtype=th.float32, **kwargs):
         out = nn.Linear(*args, **kwargs)
     elif dtype == th.float16:
         out = LinearF16(*args, **kwargs)
+    elif dtype == th.bfloat16:
+        out = LinearBF16(*args, **kwargs)
     else:
         raise ValueError(dtype)
     out.weight.data *= scale / out.weight.norm(dim=1, p=2, keepdim=True)
@@ -85,11 +87,17 @@ def NormedLinear(*args, scale=1.0, dtype=th.float32, **kwargs):
 class LinearF16(nn.Linear):
     def forward(self, x):
         return F.linear(x, self.weight.half(), self.bias.half() if self.bias is not None else None)
+class LinearBF16(nn.Linear):
+    def forward(self, x):
+        return F.linear(x, self.weight.to(th.bfloat16), self.bias.to(th.bfloat16) if self.bias is not None else None)
 
 
 class LayerNormF16(nn.LayerNorm):
     def forward(self, x):
         return F.layer_norm(x, self.normalized_shape, self.weight.half(), self.bias.half(), self.eps)
+class LayerNormBF16(nn.LayerNorm):
+    def forward(self, x):
+        return F.layer_norm(x, self.normalized_shape, self.weight.to(th.bfloat16), self.bias.to(th.bfloat16), self.eps)
 
 
 def LayerNorm(*args, dtype=th.float32, **kwargs):
@@ -98,6 +106,8 @@ def LayerNorm(*args, dtype=th.float32, **kwargs):
         out = nn.LayerNorm(*args, **kwargs)
     elif dtype == th.float16:
         out = LayerNormF16(*args, **kwargs)
+    elif dtype == th.bfloat16:
+        out = LayerNormBF16(*args, **kwargs)
     else:
         raise ValueError(dtype)
     out.weight.no_scale = True
