@@ -3,7 +3,7 @@ Embodying Language Models via PaLI-style fusion and VPT-style pretraining
 
 This was an ambitious engineering & ML research project for my year 3 dissertation.
 
-The idea was basically looking at the new (at the time) multimodal VLMs like Flamingo (https://arxiv.org/abs/2204.14198) and PaLI (https://arxiv.org/abs/2209.06794); and the new ability to tap unlabelled videos for behavioural cloning datasets from Video Pre-Training (https://arxiv.org/abs/2206.11795); and combining the two for the purpose of embodying LLMs into raw pixel/mouse/keyboard-level agents.
+The idea was basically looking at the new (at the time) multimodal VLMs like Flamingo (https://arxiv.org/abs/2204.14198) and PaLI (https://arxiv.org/abs/2209.06794); and the new ability to tap unlabelled video data for behavioural cloning datasets from Video Pre-Training (https://arxiv.org/abs/2206.11795); and combining the two for the purpose of embodying LLMs into an agent which works at the level of raw pixels, mouse movements and keystrokes.
 
 This involved much data gathering, much deliberation about efficient ways to implement multimodal cross attention in a video-friendly, autoregressive way, and much working into understanding the models and repos for VPT (https://github.com/openai/Video-Pre-Training), TransformerXL (https://github.com/kimiyoung/transformer-xl), and Flamingo (https://github.com/lucidrains/flamingo-pytorch) which this work starts from (especially the VPT codebase, since we re-use the training loop from there and this makes up the majority of the complexity and code of the model).
 
