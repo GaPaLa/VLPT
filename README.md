@@ -11,7 +11,7 @@ This repository provides all the code I used, from the various data gathering st
 
 As the model trains we can see language modelling and action mdelling losses decrease, as well as increasing dependence between the two models (we use gated cross attention as in the Flamingo apper, and like that paper we see the gate values increase across training). Unfortunately, due to issues with the VPT repo (we couldn't figure out how to use even the unmodified VPT repo to finetune an agent without it becoming erratic), time constraints and (potentially) VRAM constraints (its unclear if increasing batch size would have solved instabilities), the resulting agent behaves erratically, its language degenerates a few seconds into the episode, and we're unable to reach conclusive results on the learnt relation between language and actions.
 
-I would like to get back to this, especially now that there are other works we can reference which build from VPT and are able to finetune the agent successfuly, but my research interests have changed more towards interpretability, scalable adaptive compute time & recurrence, and investigating ICL & SGD, so this remains on the to-do list while I pursue those areas first.
+I would like to get back to this, especially now that there are other works we can reference which build from VPT and are able to finetune the agent successfuly, but my research interests have changed more towards interpretability, scalable adaptive compute time & recurrence, and investigating ICL & SGD, so this remains on the to-do list.
 
 # Key Files
 
