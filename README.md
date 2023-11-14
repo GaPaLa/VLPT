@@ -14,3 +14,9 @@ As the model trains we can see language modelling and action mdelling losses dec
 Unfortunately, due to issues with the VPT repo (we couldn't figure out how to use even the unmodified VPT repo to finetune an agent without it becoming erratic), time constraints and (potentially) VRAM constraints (its unclear if increasing batch size would have solved instabilities), the resulting agent behaves erratically, its language degenerates, and we're unable to reach conclusive results on the learnt relation between language and actions.
 
 I would like to get back to this, especially now that there are other works we can reference which build from VPT and are able to finetune the agent successfuly, but my research interests have changed more towards interpretability, scalable adaptive compute time & recurrence, and investigating the strength of ICL vs SGD, so this remains on the to-do list while I pursue those areas first.
+
+# Key Files
+
+VLPT.pdf contains the dissertation itself. The last appendices of this describe all the important files and code, as well as the file structure of the project.
+
+main.ipynb illustrates how all the different files were executed to carry out the dissertation, neatly explaining the order in which it's all run.
