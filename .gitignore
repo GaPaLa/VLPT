@@ -13,10 +13,6 @@ Data Gathering/ffmpeg.exe
 Data Gathering/SVM2
 Data Gathering/SVM3
 Data Gathering/spamham_samples/frames/*
-Data Gathering/DATASET/all/*
-Data Gathering/DATASET/valid/*
-Data Gathering/DATASET/eval/*
-Data Gathering/DATASET/train/*
 *.mp4
 log*
 *.pyc
